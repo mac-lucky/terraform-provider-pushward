@@ -2,7 +2,10 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -81,7 +84,7 @@ func (r *routeOrderResource) put(ctx context.Context, plan *routeOrderModel, dia
 		Items []client.Route `json:"items"`
 	}
 	if err := r.c.Do(ctx, http.MethodPut, r.c.OrgPath("routes", "order"), map[string]any{"route_ids": ids}, &out); err != nil {
-		diags.AddError("Reordering the routing rules failed", err.Error())
+		diags.AddError("Reordering the routing rules failed", r.orderMismatch(ctx, ids, err))
 		return
 	}
 	plan.ID = types.StringValue(r.c.OrgID)
@@ -132,4 +135,39 @@ func (r *routeOrderResource) Update(ctx context.Context, req resource.UpdateRequ
 
 // Delete only forgets the order: there is no order to remove.
 func (r *routeOrderResource) Delete(context.Context, resource.DeleteRequest, *resource.DeleteResponse) {
+}
+
+// orderMismatch explains a 409 org.routes_changed. The server's advice is to
+// reload and retry, but from Terraform the cause is a route_ids list that does
+// not name every rule, so retrying never helps: name what is off instead.
+func (r *routeOrderResource) orderMismatch(ctx context.Context, ids []string, err error) string {
+	var e *client.Error
+	if !errors.As(err, &e) || e.Status != http.StatusConflict || e.Code != "org.routes_changed" {
+		return err.Error()
+	}
+	var out struct {
+		Items []client.Route `json:"items"`
+	}
+	if r.c.Do(ctx, http.MethodGet, r.c.OrgPath("routes"), nil, &out) != nil {
+		return err.Error()
+	}
+	var missing, unknown []string
+	for _, rt := range out.Items {
+		if !slices.Contains(ids, rt.ID) {
+			missing = append(missing, rt.ID+" ("+rt.SlugPattern+")")
+		}
+	}
+	for _, id := range ids {
+		if !slices.ContainsFunc(out.Items, func(rt client.Route) bool { return rt.ID == id }) {
+			unknown = append(unknown, id)
+		}
+	}
+	msg := "route_ids must name every routing rule of the organization exactly once, including rules made outside Terraform."
+	if len(missing) > 0 {
+		msg += " Missing: " + strings.Join(missing, ", ") + "."
+	}
+	if len(unknown) > 0 {
+		msg += " Not a rule of the organization: " + strings.Join(unknown, ", ") + "."
+	}
+	return msg + " Server said: " + err.Error()
 }

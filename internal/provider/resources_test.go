@@ -392,3 +392,28 @@ func TestAccLostOrgKeepsState(t *testing.T) {
 		t.Errorf("the tag was created %d times", n)
 	}
 }
+
+func TestAccRouteOrderNamesMissingRule(t *testing.T) {
+	f := newFake(t)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.empty,
+		Steps: []resource.TestStep{{
+			Config: f.config(`
+resource "pushward_org_route" "a" {
+  slug_pattern = "a-*"
+  applies_to   = "both"
+}
+resource "pushward_org_route" "b" {
+  slug_pattern = "b-*"
+  applies_to   = "widgets"
+}
+resource "pushward_org_route_order" "this" {
+  route_ids  = [pushward_org_route.a.id]
+  depends_on = [pushward_org_route.b]
+}
+`),
+			ExpectError: regexp.MustCompile(`(?s)route_ids must name every routing rule.*Missing:\s+\S+ \(b-\*\)`),
+		}},
+	})
+}
