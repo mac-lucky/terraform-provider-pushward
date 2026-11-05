@@ -8,8 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
@@ -20,6 +24,36 @@ import (
 var routingName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
 
 const routingNameRule = "must be 1-40 lowercase letters, digits, - and _, starting with a letter or digit"
+
+var noUpper = regexp.MustCompile(`^[^A-Z]*$`)
+
+// lowerID refuses an uppercase id in a list: PushWard lowercases ids, so the
+// list it returns would never match the configuration.
+var lowerID = stringvalidator.RegexMatches(noUpper, "must be lowercase, as PushWard returns ids (use lower())")
+
+func orgIDAttribute() schema.StringAttribute {
+	return schema.StringAttribute{
+		MarkdownDescription: "The organization the resource belongs to, that of the provider's org admin key when the resource " +
+			"was created or imported. An org admin key of another organization is an error, not a plan that creates the resource again there.",
+		Computed:      true,
+		PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+	}
+}
+
+// sameOrg reports whether the provider's key belongs to the organization
+// recorded in org, and records the key's organization when org is empty
+// (state from before org_id). Another organization answers a resource's id
+// with the resource's own 404, which must not read as the resource gone.
+func sameOrg(c *client.Client, org *types.String, diags *diag.Diagnostics) bool {
+	if v := org.ValueString(); v != "" && v != c.OrgID {
+		diags.AddError("The org admin key belongs to another organization",
+			"This resource belongs to organization "+v+", but the provider's org admin key belongs to organization "+c.OrgID+". "+
+				"Configure a key of organization "+v+", or stop managing the resource here with terraform state rm.")
+		return false
+	}
+	*org = types.StringValue(c.OrgID)
+	return true
+}
 
 // providerClient takes the client the provider configured. It is nil while
 // Terraform validates a configuration before the provider is configured.

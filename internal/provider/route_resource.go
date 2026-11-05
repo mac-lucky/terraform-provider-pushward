@@ -31,6 +31,7 @@ type routeModel struct {
 	AllowGroupIDs types.Set    `tfsdk:"allow_group_ids"`
 	AllowTagIDs   types.Set    `tfsdk:"allow_tag_ids"`
 	Note          types.String `tfsdk:"note"`
+	OrgID         types.String `tfsdk:"org_id"`
 }
 
 func newRouteResource() resource.Resource { return &routeResource{} }
@@ -68,7 +69,7 @@ func (r *routeResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional:            true,
 				Computed:            true,
 				Default:             setdefault.StaticValue(emptySet()),
-				Validators:          []validator.Set{setvalidator.SizeAtMost(50)},
+				Validators:          []validator.Set{setvalidator.SizeAtMost(50), setvalidator.ValueStringsAre(lowerID)},
 			},
 			"allow_tag_ids": schema.SetAttribute{
 				MarkdownDescription: "Devices with these tags receive what the rule matches. At most 50. " +
@@ -77,13 +78,14 @@ func (r *routeResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional:    true,
 				Computed:    true,
 				Default:     setdefault.StaticValue(emptySet()),
-				Validators:  []validator.Set{setvalidator.SizeAtMost(50)},
+				Validators:  []validator.Set{setvalidator.SizeAtMost(50), setvalidator.ValueStringsAre(lowerID)},
 			},
 			"note": schema.StringAttribute{
 				MarkdownDescription: "Up to 200 characters.",
 				Optional:            true,
 				Validators:          []validator.String{stringvalidator.UTF8LengthBetween(1, 200), trimmed},
 			},
+			"org_id": orgIDAttribute(),
 		},
 	}
 }
@@ -122,6 +124,7 @@ func (r *routeResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 	body["note"] = plan.Note.ValueStringPointer()
+	plan.OrgID = types.StringValue(r.c.OrgID)
 	var rt client.Route
 	if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("routes"), body, &rt); err != nil {
 		resp.Diagnostics.AddError("Creating the routing rule failed", err.Error())
@@ -134,7 +137,7 @@ func (r *routeResource) Create(ctx context.Context, req resource.CreateRequest, 
 func (r *routeResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state routeModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	var rt client.Route
@@ -156,9 +159,10 @@ func (r *routeResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	body := plan.body(ctx, &resp.Diagnostics)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
+	plan.OrgID = state.OrgID
 	body["note"] = clearable(plan.Note)
 	var rt client.Route
 	if err := r.c.Do(ctx, http.MethodPatch, r.c.OrgPath("routes", state.ID.ValueString()), body, &rt); err != nil {
@@ -172,7 +176,7 @@ func (r *routeResource) Update(ctx context.Context, req resource.UpdateRequest, 
 func (r *routeResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state routeModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	err := r.c.Do(ctx, http.MethodDelete, r.c.OrgPath("routes", state.ID.ValueString()), nil, nil)

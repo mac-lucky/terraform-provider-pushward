@@ -25,6 +25,7 @@ type routeOrderResource struct{ c *client.Client }
 type routeOrderModel struct {
 	ID       types.String `tfsdk:"id"`
 	RouteIDs types.List   `tfsdk:"route_ids"`
+	OrgID    types.String `tfsdk:"org_id"`
 }
 
 func newRouteOrderResource() resource.Resource { return &routeOrderResource{} }
@@ -48,8 +49,9 @@ func (r *routeOrderResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				MarkdownDescription: "Every rule's id, first match first.",
 				ElementType:         types.StringType,
 				Required:            true,
-				Validators:          []validator.List{listvalidator.UniqueValues(), listvalidator.SizeAtMost(100)},
+				Validators:          []validator.List{listvalidator.UniqueValues(), listvalidator.SizeAtMost(100), listvalidator.ValueStringsAre(lowerID)},
 			},
+			"org_id": orgIDAttribute(),
 		},
 	}
 }
@@ -63,6 +65,7 @@ func (r *routeOrderResource) ImportState(ctx context.Context, _ resource.ImportS
 	resp.Diagnostics.Append(resp.State.Set(ctx, &routeOrderModel{
 		ID:       types.StringValue(r.c.OrgID),
 		RouteIDs: types.ListNull(types.StringType),
+		OrgID:    types.StringValue(r.c.OrgID),
 	})...)
 }
 
@@ -88,6 +91,7 @@ func (r *routeOrderResource) put(ctx context.Context, plan *routeOrderModel, dia
 		return
 	}
 	plan.ID = types.StringValue(r.c.OrgID)
+	plan.OrgID = types.StringValue(r.c.OrgID)
 	plan.RouteIDs = routeIDs(out.Items)
 }
 
@@ -106,7 +110,7 @@ func (r *routeOrderResource) Create(ctx context.Context, req resource.CreateRequ
 func (r *routeOrderResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state routeOrderModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	var out struct {
@@ -122,9 +126,10 @@ func (r *routeOrderResource) Read(ctx context.Context, req resource.ReadRequest,
 }
 
 func (r *routeOrderResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan routeOrderModel
+	var plan, state routeOrderModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	if resp.Diagnostics.HasError() {
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	r.put(ctx, &plan, &resp.Diagnostics)
@@ -133,7 +138,8 @@ func (r *routeOrderResource) Update(ctx context.Context, req resource.UpdateRequ
 	}
 }
 
-// Delete only forgets the order: there is no order to remove.
+// Delete only forgets the order: there is no order to remove, so it sends
+// nothing, to any organization.
 func (r *routeOrderResource) Delete(context.Context, resource.DeleteRequest, *resource.DeleteResponse) {
 }
 

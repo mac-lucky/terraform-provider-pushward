@@ -61,12 +61,13 @@ output "ci_key" {
 - `activity_slugs` (Set of String) Restrict the key to these activity slugs or patterns (trailing `*`). Empty means unrestricted.
 - `expires_at` (String) When the key stops working, an RFC 3339 time in the future. Unset means never. An import reads it as PushWard returns it, so when the configuration spells the same time another way (another UTC offset), the first apply after an import rewrites it in place and changes nothing else.
 - `permissions` (Attributes) What the key may do. Organization keys have no device, sharing or account access. (see [below for nested schema](#nestedatt--permissions))
-- `target` (Attributes) Limit the key to these groups and tags: what it sends must target inside them, and it sees only activities and widgets targeted inside them. Unset reaches the whole organization. Changing it replaces the key. (see [below for nested schema](#nestedatt--target))
+- `target` (Attributes) Limit the key to these groups and tags: what it sends must target inside them, and it sees only activities and widgets targeted inside them. Unset reaches the whole organization. It must name at least one group or tag. Changing it replaces the key. (see [below for nested schema](#nestedatt--target))
 - `widget_slugs` (Set of String) Restrict the key to these widget slugs or patterns (trailing `*`). Empty means unrestricted.
 
 ### Read-Only
 
 - `id` (String) The ID of this resource.
+- `org_id` (String) The organization the resource belongs to, that of the provider's org admin key when the resource was created or imported. An org admin key of another organization is an error, not a plan that creates the resource again there.
 - `secret` (String, Sensitive) The key's secret (`hlk_...`). Only known when Terraform created the key.
 
 <a id="nestedatt--permissions"></a>
@@ -75,7 +76,7 @@ output "ci_key" {
 Optional:
 
 - `activities` (String) `none`, `read` (list and get), `update` (also PATCH) or `manage` (also create and delete). Defaults to `manage`.
-- `emails` (String) `none` or `send`. Not for a key with a `target`. Defaults to `none`.
+- `emails` (String) `none` or `send`. Not for a key with a `target`, which PushWard refuses. Defaults to `none`.
 - `notifications` (String) `none`, `send` (send and read answers) or `schedule` (also scheduled notifications). Defaults to `schedule`.
 - `widgets` (String) `none`, `read` or `write`. Defaults to `none`.
 

@@ -131,6 +131,22 @@ func (f *fakeAPI) member(id string) *client.Member {
 	return nil
 }
 
+// usable is the server's orgInviteUsable: someone can still join with it.
+func usable(inv *client.Invite) bool {
+	return inv.RevokedAt == nil && time.Now().Before(inv.ExpiresAt) && inv.Uses < inv.MaxUses
+}
+
+// lowerIDs lowercases and dedupes an id list, as the server's checkUUIDs does.
+func lowerIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id = strings.ToLower(id); !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func (f *fakeAPI) emailTaken(email string) bool {
 	for _, m := range f.members {
 		if m.Email != nil && strings.EqualFold(*m.Email, email) {
@@ -138,7 +154,7 @@ func (f *fakeAPI) emailTaken(email string) bool {
 		}
 	}
 	for _, inv := range f.invites {
-		if inv.Email != nil && strings.EqualFold(*inv.Email, email) && inv.RevokedAt == nil && inv.RedeemedBy == nil && time.Now().Before(inv.ExpiresAt) {
+		if inv.Email != nil && strings.EqualFold(*inv.Email, email) && usable(inv) {
 			return true
 		}
 	}
@@ -165,6 +181,14 @@ func (f *fakeAPI) expire(inviteID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.invites[inviteID].ExpiresAt = time.Now().Add(-time.Minute)
+}
+
+// useUp leaves an invite as it is once the person who joined with it deleted
+// their account: no uses left and no redeemed_by.
+func (f *fakeAPI) useUp(inviteID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invites[inviteID].Uses = f.invites[inviteID].MaxUses
 }
 
 func (f *fakeAPI) addMember(role, email string) string {
@@ -422,13 +446,14 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		if !decode(w, r, &body) {
 			return
 		}
+		body.UserIDs = lowerIDs(body.UserIDs)
 		for _, id := range body.UserIDs {
 			if f.member(id) == nil {
 				problem(w, 422, "org.routing_invalid", "the change names a member, device, group or tag that is not in this organization")
 				return
 			}
 		}
-		g.MemberIDs = append([]string{}, body.UserIDs...)
+		g.MemberIDs = body.UserIDs
 		reply(w, 200, g)
 	})
 	mux.HandleFunc("DELETE /orgs/{org}/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -508,8 +533,8 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		now := time.Now().UTC()
 		rt.ID, rt.CreatedAt, rt.UpdatedAt = f.id(), now, now
-		rt.AllowGroupIDs = append([]string{}, rt.AllowGroupIDs...)
-		rt.AllowTagIDs = append([]string{}, rt.AllowTagIDs...)
+		rt.AllowGroupIDs = lowerIDs(rt.AllowGroupIDs)
+		rt.AllowTagIDs = lowerIDs(rt.AllowTagIDs)
 		rt.Note = desc(rt.Note)
 		f.routes = append(f.routes, &rt)
 		list()
@@ -527,7 +552,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			return
 		}
 		ordered := make([]*client.Route, 0, len(f.routes))
-		for _, id := range body.RouteIDs {
+		for _, id := range lowerIDs(body.RouteIDs) {
 			rt := route(id)
 			if rt == nil {
 				problem(w, 409, "org.routes_changed", "the rules changed meanwhile; reload them and try again")
@@ -569,10 +594,10 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			rt.AppliesTo = *body.AppliesTo
 		}
 		if body.AllowGroupIDs != nil {
-			rt.AllowGroupIDs = *body.AllowGroupIDs
+			rt.AllowGroupIDs = lowerIDs(*body.AllowGroupIDs)
 		}
 		if body.AllowTagIDs != nil {
-			rt.AllowTagIDs = *body.AllowTagIDs
+			rt.AllowTagIDs = lowerIDs(*body.AllowTagIDs)
 		}
 		if body.Note != nil {
 			rt.Note = desc(body.Note)
@@ -601,6 +626,13 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		if k.Target != nil && k.Permissions.Emails != "none" {
 			problem(w, 422, "org.key_permission_unavailable", "a key limited to groups and tags cannot send emails")
 			return
+		}
+		if k.Target != nil {
+			k.Target.GroupIDs, k.Target.TagIDs = lowerIDs(k.Target.GroupIDs), lowerIDs(k.Target.TagIDs)
+			if len(k.Target.GroupIDs)+len(k.Target.TagIDs) == 0 {
+				problem(w, 422, "org.routing_invalid", "target must name at least one group or tag; omit it to let the key send to everyone")
+				return
+			}
 		}
 		if k.ExpiresAt != nil && !k.ExpiresAt.After(time.Now()) {
 			problem(w, 400, "integration_key.expires_at_invalid", "expires_at must be in the future")

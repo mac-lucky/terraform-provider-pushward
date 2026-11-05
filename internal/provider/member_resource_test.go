@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"regexp"
 	"testing"
-	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -58,7 +57,7 @@ func (f *fakeAPI) onlyOwnerLeft(*terraform.State) error {
 		return fmt.Errorf("%d members left after destroy", len(f.members))
 	}
 	for id, inv := range f.invites {
-		if inv.RevokedAt == nil && inv.RedeemedBy == nil && time.Now().Before(inv.ExpiresAt) {
+		if usable(inv) {
 			return fmt.Errorf("invite %s still open after destroy", id)
 		}
 	}
@@ -263,7 +262,9 @@ func TestAccMemberImportWithoutLabel(t *testing.T) {
 	})
 }
 
-func TestAccMemberExpiredInvite(t *testing.T) {
+// An invite nobody can join with any more drops the member from the state,
+// and the next apply invites them again.
+func TestAccMemberUnusableInvite(t *testing.T) {
 	f := newFake(t)
 	var invite string
 	resource.Test(t, resource.TestCase{
@@ -284,6 +285,16 @@ func TestAccMemberExpiredInvite(t *testing.T) {
 				),
 			},
 			{
+				// Used up without redeemed_by: whoever joined deleted their account.
+				PreConfig: func() { f.useUp(invite) },
+				Config:    memberConfig(f, "member"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(memberName, "status", "pending"),
+					attrNot(memberName, "invite_id", &invite),
+					saveAttr(memberName, "invite_id", &invite),
+				),
+			},
+			{
 				// Joined now, so destroy removes the member (onlyOwnerLeft).
 				PreConfig: func() { f.join(invite) },
 				Config:    memberConfig(f, "member"),
@@ -291,6 +302,26 @@ func TestAccMemberExpiredInvite(t *testing.T) {
 			},
 		},
 	})
+}
+
+// An admin cannot be managed with an org admin key: importing one fails with
+// the console hint instead of planning a role change that 403s on every apply.
+func TestAccMemberUnmanageableRole(t *testing.T) {
+	f := newFake(t)
+	uid := f.addMember("admin", "ann@example.com")
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{{
+			Config:        memberConfig(f, "member"),
+			ResourceName:  memberName,
+			ImportState:   true,
+			ImportStateId: uid,
+			ExpectError:   regexp.MustCompile(`(?s)admin\s+role.*console`),
+		}},
+	})
+	if got := f.memberRole(uid); got != "admin" {
+		t.Errorf("role on the server = %q", got)
+	}
 }
 
 func TestAccMemberEmailTaken(t *testing.T) {

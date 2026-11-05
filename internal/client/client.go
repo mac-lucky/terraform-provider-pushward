@@ -48,7 +48,8 @@ type Client struct {
 	// MaxAttempts is how many times a request is sent, the first included.
 	MaxAttempts int
 	// MaxWait caps a single wait between attempts. A server hint longer than
-	// that fails the request instead of blocking the run.
+	// that fails the request instead of blocking the run. It covers the flat
+	// 60 s hint of the API's minute rate limits.
 	MaxWait time.Duration
 	// BaseWait is the first wait when the server gives no hint; it doubles
 	// on every attempt.
@@ -63,7 +64,7 @@ func New(baseURL, key, version string) *Client {
 		UserAgent:   "terraform-provider-pushward/" + version,
 		HTTP:        &http.Client{Timeout: 30 * time.Second},
 		MaxAttempts: 5,
-		MaxWait:     30 * time.Second,
+		MaxWait:     time.Minute,
 		BaseWait:    time.Second,
 	}
 }

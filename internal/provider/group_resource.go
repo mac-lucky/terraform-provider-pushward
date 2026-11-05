@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -24,6 +25,7 @@ type groupModel struct {
 	Name        types.String `tfsdk:"name"`
 	Description types.String `tfsdk:"description"`
 	MemberIDs   types.Set    `tfsdk:"member_ids"`
+	OrgID       types.String `tfsdk:"org_id"`
 }
 
 func newGroupResource() resource.Resource { return &groupResource{} }
@@ -58,7 +60,9 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional:            true,
 				Computed:            true,
 				Default:             setdefault.StaticValue(emptySet()),
+				Validators:          []validator.Set{setvalidator.ValueStringsAre(lowerID)},
 			},
+			"org_id": orgIDAttribute(),
 		},
 	}
 }
@@ -85,6 +89,7 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	plan.OrgID = types.StringValue(r.c.OrgID)
 	var g client.Group
 	body := map[string]any{"name": plan.Name.ValueString(), "description": plan.Description.ValueStringPointer()}
 	if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("groups"), body, &g); err != nil {
@@ -109,7 +114,7 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 func (r *groupResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state groupModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	var g client.Group
@@ -131,9 +136,10 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	members := setStrings(ctx, plan.MemberIDs, &resp.Diagnostics)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
+	plan.OrgID = state.OrgID
 	id := state.ID.ValueString()
 	var g client.Group
 	if !plan.Name.Equal(state.Name) || !plan.Description.Equal(state.Description) {
@@ -158,7 +164,7 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 func (r *groupResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state groupModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	err := r.c.Do(ctx, http.MethodDelete, r.c.OrgPath("groups", state.ID.ValueString()), nil, nil)

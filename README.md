@@ -18,6 +18,12 @@ PushWard has two kinds of API key, and this provider takes the first:
   them for the organization; your integrations use those.
 
 The provider looks up the key's organization when it starts, so nothing takes an org id.
+Each resource records it in `org_id`. A key of another organization is an error, not a
+plan that creates everything again over there.
+
+The open invites a `manage` key sent belong to that key. Revoking it, or lowering it to
+`read`, revokes them too, and the next apply mails every pending member a new invite. To
+rotate the key, roll it in the console: that keeps its id and its invites.
 
 ## Example
 

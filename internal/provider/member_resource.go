@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"net/http"
-	"regexp"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -22,8 +21,6 @@ const (
 	statusJoined  = "joined"
 )
 
-var noUpper = regexp.MustCompile(`^[^A-Z]*$`)
-
 type memberResource struct{ c *client.Client }
 
 type memberModel struct {
@@ -33,7 +30,13 @@ type memberModel struct {
 	UserID   types.String `tfsdk:"user_id"`
 	Status   types.String `tfsdk:"status"`
 	InviteID types.String `tfsdk:"invite_id"`
+	OrgID    types.String `tfsdk:"org_id"`
 }
+
+// manageable mirrors the server's OrgRoleCanManage for an admin, which is
+// what a manage key acts as: owners, admins and billing members are the
+// owners' to manage.
+func manageable(role string) bool { return role == "member" || role == "viewer" }
 
 var _ resource.ResourceWithModifyPlan = &memberResource{}
 
@@ -47,12 +50,15 @@ func (r *memberResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "A member of the organization, invited by email.\n\n" +
 			"Creating one mails a one-use invite; the member is `pending` until the person joins with it, then `joined` " +
-			"with a `user_id`. Terraform notices on the next plan. An invite that expires or is revoked before anyone " +
-			"joins, and a member who leaves or is removed, drop out of the state, so the next apply invites them again.\n\n" +
+			"with a `user_id`. Terraform notices on the next plan. An invite that expires, is revoked or is used up before " +
+			"anyone joins, and a member who leaves or is removed, drop out of the state, so the next apply invites them again.\n\n" +
 			"While pending, changing `email` or `role` revokes the invite and mails a new one. Once joined, `role` " +
 			"changes the member's role and `email` the address PushWard shows for them, an unverified label.\n\n" +
 			"An org admin key grants `member` and `viewer` only. Owners, admins and billing members are managed in the " +
-			"PushWard console.",
+			"PushWard console; reading or importing one is an error.\n\n" +
+			"Revoking the org admin key, or lowering it from `manage` to `read`, revokes the open invites it sent: those " +
+			"members drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it " +
+			"in the console, which keeps its invites, instead of replacing it with a new key.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The user id once joined, the invite id while pending.",
@@ -84,6 +90,7 @@ func (r *memberResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				MarkdownDescription: "The invite that was mailed; null after an import.",
 				Computed:            true,
 			},
+			"org_id": orgIDAttribute(),
 		},
 	}
 }
@@ -147,7 +154,9 @@ func (r *memberResource) resolve(ctx context.Context, m *memberModel) (gone bool
 			return false, err
 		}
 		if inv.RedeemedBy == nil || *inv.RedeemedBy == "" {
-			if inv.RevokedAt != nil || !time.Now().Before(inv.ExpiresAt) {
+			// Used up with nobody to show for it: whoever joined deleted
+			// their account. Nobody can join with it any more.
+			if inv.RevokedAt != nil || !time.Now().Before(inv.ExpiresAt) || inv.Uses >= inv.MaxUses {
 				return true, nil
 			}
 			m.ID = types.StringValue(inv.ID)
@@ -205,6 +214,7 @@ func (r *memberResource) Create(ctx context.Context, req resource.CreateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	plan.OrgID = types.StringValue(r.c.OrgID)
 	if err := r.invite(ctx, &plan); err != nil {
 		inviteFailed(&resp.Diagnostics, plan.Email.ValueString(), err)
 		return
@@ -215,7 +225,7 @@ func (r *memberResource) Create(ctx context.Context, req resource.CreateRequest,
 func (r *memberResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state memberModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	gone, err := r.resolve(ctx, &state)
@@ -227,6 +237,15 @@ func (r *memberResource) Read(ctx context.Context, req resource.ReadRequest, res
 		resp.State.RemoveResource(ctx)
 		return
 	}
+	// A role change would only meet 403 on every apply. Import reads too, so
+	// this refuses importing such a member as well.
+	if role := state.Role.ValueString(); !manageable(role) {
+		resp.Diagnostics.AddError("Manage this person in the console",
+			"User "+state.UserID.ValueString()+" has the "+role+" role in the organization. An org admin key manages members and viewers only: "+
+				"manage this person in the PushWard console at https://console.pushward.app, and remove the resource from the "+
+				"configuration and the state (terraform state rm).")
+		return
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -234,9 +253,10 @@ func (r *memberResource) Update(ctx context.Context, req resource.UpdateRequest,
 	var plan, state memberModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
+	plan.OrgID = state.OrgID
 	wasJoined := state.Status.ValueString() == statusJoined
 	cur := state
 	gone, err := r.resolve(ctx, &cur)
@@ -290,7 +310,7 @@ func (r *memberResource) Update(ctx context.Context, req resource.UpdateRequest,
 func (r *memberResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state memberModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	// Re-read first: someone who joined since the refresh is removed, not

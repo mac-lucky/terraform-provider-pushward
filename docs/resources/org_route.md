@@ -51,6 +51,7 @@ resource "pushward_org_route" "rest" {
 ### Read-Only
 
 - `id` (String) The ID of this resource.
+- `org_id` (String) The organization the resource belongs to, that of the provider's org admin key when the resource was created or imported. An org admin key of another organization is an error, not a plan that creates the resource again there.
 
 ## Import
 

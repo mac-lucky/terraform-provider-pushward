@@ -35,6 +35,7 @@ type keyModel struct {
 	ExpiresAt     types.String    `tfsdk:"expires_at"`
 	Target        *keyTarget      `tfsdk:"target"`
 	Secret        types.String    `tfsdk:"secret"`
+	OrgID         types.String    `tfsdk:"org_id"`
 }
 
 type keyPermissions struct {
@@ -57,6 +58,8 @@ var defaultKeyLevels = map[string]string{
 	"widgets":       "none",
 	"emails":        "none",
 }
+
+var _ resource.ResourceWithValidateConfig = &keyResource{}
 
 func newKeyResource() resource.Resource { return &keyResource{} }
 
@@ -97,7 +100,7 @@ func (r *keyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			Optional:            true,
 			Computed:            true,
 			Default:             setdefault.StaticValue(emptySet()),
-			Validators:          []validator.Set{setvalidator.SizeAtMost(50)},
+			Validators:          []validator.Set{setvalidator.SizeAtMost(50), setvalidator.ValueStringsAre(lowerID)},
 		}
 	}
 	resp.Schema = schema.Schema{
@@ -128,7 +131,7 @@ func (r *keyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 						"`none`, `send` (send and read answers) or `schedule` (also scheduled notifications).",
 						"none", "send", "schedule"),
 					"widgets": level("widgets", "`none`, `read` or `write`.", "none", "read", "write"),
-					"emails":  level("emails", "`none` or `send`. Not for a key with a `target`.", "none", "send"),
+					"emails":  level("emails", "`none` or `send`. Not for a key with a `target`, which PushWard refuses.", "none", "send"),
 				},
 			},
 			"activity_slugs": slugs("Restrict the key to these activity slugs or patterns (trailing `*`)."),
@@ -143,7 +146,7 @@ func (r *keyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"target": schema.SingleNestedAttribute{
 				MarkdownDescription: "Limit the key to these groups and tags: what it sends must target inside them, and it sees " +
 					"only activities and widgets targeted inside them. Unset reaches the whole organization. " +
-					"Changing it replaces the key.",
+					"It must name at least one group or tag. Changing it replaces the key.",
 				Optional:      true,
 				PlanModifiers: []planmodifier.Object{objectplanmodifier.RequiresReplace()},
 				Attributes: map[string]schema.Attribute{
@@ -157,7 +160,33 @@ func (r *keyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 				Sensitive:           true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
+			"org_id": orgIDAttribute(),
 		},
+	}
+}
+
+// ValidateConfig refuses at plan time the targets PushWard refuses: one that
+// names nothing, and one on a key that sends emails.
+func (r *keyResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var target types.Object
+	var emails types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("target"), &target)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("permissions").AtName("emails"), &emails)...)
+	if resp.Diagnostics.HasError() || target.IsNull() || target.IsUnknown() {
+		return
+	}
+	if emails.ValueString() == "send" {
+		resp.Diagnostics.AddAttributeError(path.Root("permissions").AtName("emails"), "Emails need a key without a target",
+			"A key limited to groups and tags cannot send emails: the organization's email recipients are not in its groups and tags. "+
+				"Set emails = \"none\", or leave target out.")
+	}
+	empty := func(name string) bool {
+		s, ok := target.Attributes()[name].(types.Set)
+		return !ok || s.IsNull() || (!s.IsUnknown() && len(s.Elements()) == 0)
+	}
+	if empty("group_ids") && empty("tag_ids") {
+		resp.Diagnostics.AddAttributeError(path.Root("target"), "Empty target",
+			"target must name at least one group or tag. Leave target out to let the key reach the whole organization.")
 	}
 }
 
@@ -232,6 +261,7 @@ func (r *keyResource) Create(ctx context.Context, req resource.CreateRequest, re
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	plan.OrgID = types.StringValue(r.c.OrgID)
 	body := plan.body(ctx, &resp.Diagnostics)
 	if exp := expiry(plan.ExpiresAt, &resp.Diagnostics); exp != nil {
 		body["expires_at"] = exp
@@ -257,7 +287,7 @@ func (r *keyResource) Create(ctx context.Context, req resource.CreateRequest, re
 func (r *keyResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state keyModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	var k client.Key
@@ -278,9 +308,10 @@ func (r *keyResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	var plan, state keyModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
+	plan.OrgID = state.OrgID
 	body := plan.body(ctx, &resp.Diagnostics)
 	// Sent only when it changed: an expiry already in the past is refused.
 	if !plan.ExpiresAt.Equal(state.ExpiresAt) {
@@ -301,7 +332,7 @@ func (r *keyResource) Update(ctx context.Context, req resource.UpdateRequest, re
 func (r *keyResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state keyModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	err := r.c.Do(ctx, http.MethodDelete, r.c.OrgPath("keys", state.ID.ValueString()), nil, nil)

@@ -4,20 +4,23 @@ page_title: "pushward_org_member Resource - pushward"
 subcategory: ""
 description: |-
   A member of the organization, invited by email.
-  Creating one mails a one-use invite; the member is pending until the person joins with it, then joined with a user_id. Terraform notices on the next plan. An invite that expires or is revoked before anyone joins, and a member who leaves or is removed, drop out of the state, so the next apply invites them again.
+  Creating one mails a one-use invite; the member is pending until the person joins with it, then joined with a user_id. Terraform notices on the next plan. An invite that expires, is revoked or is used up before anyone joins, and a member who leaves or is removed, drop out of the state, so the next apply invites them again.
   While pending, changing email or role revokes the invite and mails a new one. Once joined, role changes the member's role and email the address PushWard shows for them, an unverified label.
-  An org admin key grants member and viewer only. Owners, admins and billing members are managed in the PushWard console.
+  An org admin key grants member and viewer only. Owners, admins and billing members are managed in the PushWard console; reading or importing one is an error.
+  Revoking the org admin key, or lowering it from manage to read, revokes the open invites it sent: those members drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it in the console, which keeps its invites, instead of replacing it with a new key.
 ---
 
 # pushward_org_member (Resource)
 
 A member of the organization, invited by email.
 
-Creating one mails a one-use invite; the member is `pending` until the person joins with it, then `joined` with a `user_id`. Terraform notices on the next plan. An invite that expires or is revoked before anyone joins, and a member who leaves or is removed, drop out of the state, so the next apply invites them again.
+Creating one mails a one-use invite; the member is `pending` until the person joins with it, then `joined` with a `user_id`. Terraform notices on the next plan. An invite that expires, is revoked or is used up before anyone joins, and a member who leaves or is removed, drop out of the state, so the next apply invites them again.
 
 While pending, changing `email` or `role` revokes the invite and mails a new one. Once joined, `role` changes the member's role and `email` the address PushWard shows for them, an unverified label.
 
-An org admin key grants `member` and `viewer` only. Owners, admins and billing members are managed in the PushWard console.
+An org admin key grants `member` and `viewer` only. Owners, admins and billing members are managed in the PushWard console; reading or importing one is an error.
+
+Revoking the org admin key, or lowering it from `manage` to `read`, revokes the open invites it sent: those members drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it in the console, which keeps its invites, instead of replacing it with a new key.
 
 ## Example Usage
 
@@ -51,6 +54,7 @@ resource "pushward_org_member" "team" {
 
 - `id` (String) The user id once joined, the invite id while pending.
 - `invite_id` (String) The invite that was mailed; null after an import.
+- `org_id` (String) The organization the resource belongs to, that of the provider's org admin key when the resource was created or imported. An org admin key of another organization is an error, not a plan that creates the resource again there.
 - `status` (String) `pending` until the person joins, then `joined`.
 - `user_id` (String) The member's user id; null until they join.
 

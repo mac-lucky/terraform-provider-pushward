@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,27 +81,39 @@ func TestAccGroupNameValidated(t *testing.T) {
 	})
 }
 
-// Text the server would trim or reformat is refused at plan time, before it
-// could leave a value in state that never matches the configuration.
-func TestAccTextValidated(t *testing.T) {
+// What the server would refuse, trim or reformat is refused at plan time,
+// before it could fail an apply or leave a value in state that never matches
+// the configuration.
+func TestAccPlanTimeValidation(t *testing.T) {
 	f := newFake(t)
+	const upper = `["0B000000-0000-4000-8000-000000000001"]`
 	for _, tc := range []struct{ typ, attrs, want string }{
 		{"pushward_org_group", "name = \"ops\"\ndescription = <<-EOT\n  On call\nEOT", `whitespace`},
 		{"pushward_org_tag", `name = "pager"` + "\n" + `description = " Phones"`, `whitespace`},
 		{"pushward_org_tag", `name = "pager"` + "\n" + `description = "   "`, `whitespace`},
 		{"pushward_org_route", `slug_pattern = "*"` + "\n" + `applies_to = "both"` + "\n" + `note = "All\n"`, `whitespace`},
 		{"pushward_org_key", `name = "ci"` + "\n" + `expires_at = "2027-06-30"`, `RFC 3339`},
+		{"pushward_org_key", `name = "ci"` + "\n" + `target = {}`, `at least one group or tag`},
+		{"pushward_org_key", `name = "ci"` + "\n" + `target = { group_ids = [] }`, `at least one group or tag`},
+		{"pushward_org_key", `name = "ci"` + "\n" + `permissions = { emails = "send" }` + "\n" +
+			`target = { tag_ids = ["0b000000-0000-4000-8000-000000000001"] }`, `cannot send emails`},
+		{"pushward_org_key", `name = "ci"` + "\n" + `target = { group_ids = ` + upper + ` }`, `must be lowercase`},
+		{"pushward_org_group", `name = "ops"` + "\n" + `member_ids = ` + upper, `must be lowercase`},
+		{"pushward_org_route", `slug_pattern = "*"` + "\n" + `applies_to = "both"` + "\n" + `allow_group_ids = ` + upper, `must be lowercase`},
+		{"pushward_org_route", `slug_pattern = "*"` + "\n" + `applies_to = "both"` + "\n" + `allow_tag_ids = ` + upper, `must be lowercase`},
+		{"pushward_org_route_order", `route_ids = ` + upper, `must be lowercase`},
 	} {
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: factories,
 			Steps: []resource.TestStep{{
-				Config:      f.config(fmt.Sprintf("resource %q \"x\" {\n%s\n}\n", tc.typ, tc.attrs)),
-				ExpectError: regexp.MustCompile(tc.want),
+				Config: f.config(fmt.Sprintf("resource %q \"x\" {\n%s\n}\n", tc.typ, tc.attrs)),
+				// Terraform wraps the message wherever a space is.
+				ExpectError: regexp.MustCompile(strings.ReplaceAll(tc.want, " ", `\s+`)),
 			}},
 		})
 	}
-	if n := f.count("POST", ""); n != 0 {
-		t.Errorf("refused configurations created %d things", n)
+	if n := f.count("POST", "") + f.count("PUT", ""); n != 0 {
+		t.Errorf("refused configurations sent %d writes", n)
 	}
 }
 
@@ -390,6 +403,40 @@ func TestAccLostOrgKeepsState(t *testing.T) {
 	})
 	if n := f.count("POST", "/tags"); n != 1 {
 		t.Errorf("the tag was created %d times", n)
+	}
+}
+
+// A key of another organization is an error, never a reason to read every
+// resource as gone and create it again in that organization.
+func TestAccOtherOrgKeyKeepsState(t *testing.T) {
+	for _, tc := range []struct{ addr, body string }{
+		{"pushward_org_group.x", `resource "pushward_org_group" "x" { name = "ops" }`},
+		{"pushward_org_tag.x", `resource "pushward_org_tag" "x" { name = "pager" }`},
+		{"pushward_org_route.x", "resource \"pushward_org_route\" \"x\" {\n  slug_pattern = \"*\"\n  applies_to = \"both\"\n}"},
+		{"pushward_org_route_order.x", `resource "pushward_org_route_order" "x" { route_ids = [] }`},
+		{"pushward_org_key.x", `resource "pushward_org_key" "x" { name = "ci" }`},
+		{"pushward_org_member.x", "resource \"pushward_org_member\" \"x\" {\n  email = \"ann@example.com\"\n  role = \"member\"\n}"},
+	} {
+		t.Run(tc.addr, func(t *testing.T) {
+			a, b := newFake(t), newFake(t)
+			b.mu.Lock()
+			b.org.ID = "0a000000-0000-4000-8000-000000000002"
+			b.mu.Unlock()
+			resource.Test(t, resource.TestCase{
+				ProtoV6ProviderFactories: factories,
+				Steps: []resource.TestStep{
+					{Config: a.config(tc.body), Check: resource.TestCheckResourceAttr(tc.addr, "org_id", a.org.ID)},
+					{
+						Config:      b.config(tc.body),
+						ExpectError: regexp.MustCompile(`(?s)another\s+organization.*` + a.org.ID + `.*` + b.org.ID),
+					},
+					{Config: a.config(tc.body), PlanOnly: true},
+				},
+			})
+			if n := b.count("POST", "") + b.count("PUT", ""); n != 0 {
+				t.Errorf("the other organization got %d writes", n)
+			}
+		})
 	}
 }
 

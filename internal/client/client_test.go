@@ -232,6 +232,19 @@ func TestRetryAfterHonoured(t *testing.T) {
 	}
 }
 
+// The API's minute rate limits answer with a flat 60 s hint, in the header and
+// in retry_after_ms; the default policy waits that long instead of failing.
+func TestRetryAfterOneMinuteWaited(t *testing.T) {
+	c := New(DefaultURL, "hlo_test", "test")
+	for _, body := range []string{`{"status":429,"code":"rate_limit.exceeded","retry_after_ms":60000}`, `{"status":429}`} {
+		resp := &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": {"60"}}}
+		wait, ok := c.retryWait(context.Background(), http.MethodPost, parseProblem(resp, []byte(body)), 1)
+		if !ok || wait != time.Minute {
+			t.Errorf("%s: wait = %v, %v; want 1m0s, true", body, wait, ok)
+		}
+	}
+}
+
 func TestRetryAfterBeyondCap(t *testing.T) {
 	var calls atomic.Int32
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {

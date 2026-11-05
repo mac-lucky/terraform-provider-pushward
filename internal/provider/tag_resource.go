@@ -22,6 +22,7 @@ type tagModel struct {
 	ID          types.String `tfsdk:"id"`
 	Name        types.String `tfsdk:"name"`
 	Description types.String `tfsdk:"description"`
+	OrgID       types.String `tfsdk:"org_id"`
 }
 
 func newTagResource() resource.Resource { return &tagResource{} }
@@ -49,6 +50,7 @@ func (r *tagResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 				Optional:            true,
 				Validators:          []validator.String{stringvalidator.UTF8LengthBetween(1, 200), trimmed},
 			},
+			"org_id": orgIDAttribute(),
 		},
 	}
 }
@@ -73,6 +75,7 @@ func (r *tagResource) Create(ctx context.Context, req resource.CreateRequest, re
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	plan.OrgID = types.StringValue(r.c.OrgID)
 	var t client.Tag
 	body := map[string]any{"name": plan.Name.ValueString(), "description": plan.Description.ValueStringPointer()}
 	if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("tags"), body, &t); err != nil {
@@ -86,7 +89,7 @@ func (r *tagResource) Create(ctx context.Context, req resource.CreateRequest, re
 func (r *tagResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state tagModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	var t client.Tag
@@ -107,9 +110,10 @@ func (r *tagResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	var plan, state tagModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
+	plan.OrgID = state.OrgID
 	var t client.Tag
 	body := map[string]any{"name": plan.Name.ValueString(), "description": clearable(plan.Description)}
 	if err := r.c.Do(ctx, http.MethodPatch, r.c.OrgPath("tags", state.ID.ValueString()), body, &t); err != nil {
@@ -123,7 +127,7 @@ func (r *tagResource) Update(ctx context.Context, req resource.UpdateRequest, re
 func (r *tagResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state tagModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-	if resp.Diagnostics.HasError() {
+	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
 	err := r.c.Do(ctx, http.MethodDelete, r.c.OrgPath("tags", state.ID.ValueString()), nil, nil)
