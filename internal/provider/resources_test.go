@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"slices"
@@ -8,8 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+
+	"github.com/mac-lucky/terraform-provider-pushward/internal/client"
 )
 
 // empty fails unless the fake holds nothing of what Terraform made.
@@ -437,6 +445,77 @@ func TestAccOtherOrgKeyKeepsState(t *testing.T) {
 				t.Errorf("the other organization got %d writes", n)
 			}
 		})
+	}
+}
+
+// Update and Delete check the organization too: a saved plan applied with
+// another organization's key, or a destroy with -refresh=false, never goes
+// through Read. Without the check, Delete would meet the resource's own 404
+// over there and drop it from the state.
+func TestOtherOrgKeyUpdateDelete(t *testing.T) {
+	ctx := context.Background()
+	f := newFake(t)
+	c := client.New(f.srv.URL, "hlo_test", "test")
+	c.OrgID = f.org.ID
+	const other = "0a000000-0000-4000-8000-000000000002"
+	for _, newRes := range (&pushwardProvider{}).Resources(ctx) {
+		r := newRes()
+		var md fwresource.MetadataResponse
+		r.Metadata(ctx, fwresource.MetadataRequest{ProviderTypeName: "pushward"}, &md)
+		t.Run(md.TypeName, func(t *testing.T) {
+			r.(fwresource.ResourceWithConfigure).Configure(ctx, fwresource.ConfigureRequest{ProviderData: c}, &fwresource.ConfigureResponse{})
+			var sr fwresource.SchemaResponse
+			r.Schema(ctx, fwresource.SchemaRequest{}, &sr)
+			null := tftypes.NewValue(sr.Schema.Type().TerraformType(ctx), nil)
+			st := tfsdk.State{Schema: sr.Schema, Raw: null}
+			d := st.SetAttribute(ctx, path.Root("id"), "00000000-0000-4000-8000-000000000099")
+			if d.Append(st.SetAttribute(ctx, path.Root("org_id"), other)...); d.HasError() {
+				t.Fatal(d)
+			}
+			newState := func() tfsdk.State { return tfsdk.State{Schema: sr.Schema, Raw: null} }
+
+			upd := fwresource.UpdateResponse{State: newState()}
+			r.Update(ctx, fwresource.UpdateRequest{Plan: tfsdk.Plan{Schema: sr.Schema, Raw: st.Raw}, State: st}, &upd)
+			del := fwresource.DeleteResponse{State: newState()}
+			r.Delete(ctx, fwresource.DeleteRequest{State: st}, &del)
+			ops := map[string]diag.Diagnostics{"Update": upd.Diagnostics}
+			// The order's Delete sends nothing at all; the request check below covers it.
+			if md.TypeName != "pushward_org_route_order" {
+				ops["Delete"] = del.Diagnostics
+			}
+			for op, diags := range ops {
+				if len(diags) != 1 || diags[0].Summary() != "The org admin key belongs to another organization" {
+					t.Errorf("%s diagnostics = %v, want the other-organization error", op, diags)
+				}
+			}
+		})
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) != 0 {
+		t.Errorf("requests reached the other organization: %v", f.requests)
+	}
+}
+
+func TestFakeRefusesEmailsOnTargetedKeyUpdate(t *testing.T) {
+	ctx := context.Background()
+	f := newFake(t)
+	c := client.New(f.srv.URL, "hlo_test", "test")
+	c.OrgID = f.org.ID
+	var k client.Key
+	body := map[string]any{"name": "ci", "target": map[string]any{"tag_ids": []string{"0b000000-0000-4000-8000-000000000001"}}}
+	if err := c.Do(ctx, "POST", c.OrgPath("keys"), body, &k); err != nil {
+		t.Fatal(err)
+	}
+	perms := map[string]string{"activities": "manage", "notifications": "schedule", "widgets": "none", "emails": "send"}
+	err := c.Do(ctx, "PATCH", c.OrgPath("keys", k.ID), map[string]any{"name": "ci-mail", "permissions": perms}, nil)
+	if !client.HasCode(err, "org.key_permission_unavailable") {
+		t.Fatalf("PATCH emails = send on a targeted key: err = %v, want 422 org.key_permission_unavailable", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := f.keys[k.ID]; got.Name != "ci" || got.Permissions.Emails != "none" {
+		t.Errorf("refused PATCH changed the key: name %q, emails %q", got.Name, got.Permissions.Emails)
 	}
 }
 

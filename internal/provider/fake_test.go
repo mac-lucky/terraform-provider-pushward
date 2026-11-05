@@ -131,12 +131,14 @@ func (f *fakeAPI) member(id string) *client.Member {
 	return nil
 }
 
-// usable is the server's orgInviteUsable: someone can still join with it.
+// usable reports whether someone can still join with the invite: not
+// revoked, not expired and not used up.
 func usable(inv *client.Invite) bool {
 	return inv.RevokedAt == nil && time.Now().Before(inv.ExpiresAt) && inv.Uses < inv.MaxUses
 }
 
-// lowerIDs lowercases and dedupes an id list, as the server's checkUUIDs does.
+// lowerIDs lowercases and dedupes an id list, as the API does with the ids it
+// is sent.
 func lowerIDs(ids []string) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -676,6 +678,14 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		if _, ok := body["target"]; ok {
 			problem(w, 422, "", "target cannot change")
 			return
+		}
+		if raw, ok := body["permissions"]; ok && k.Target != nil {
+			var p client.KeyPermissions
+			_ = json.Unmarshal(raw, &p)
+			if p.Emails != "" && p.Emails != "none" {
+				problem(w, 422, "org.key_permission_unavailable", "a key limited to groups and tags cannot send emails")
+				return
+			}
 		}
 		if raw, ok := body["name"]; ok {
 			_ = json.Unmarshal(raw, &k.Name)
