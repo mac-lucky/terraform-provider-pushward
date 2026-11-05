@@ -22,10 +22,14 @@ Each resource records it in `org_id`. A key of another organization is an error,
 plan that creates everything again over there.
 
 The open invites a `manage` key sent belong to that key. Revoking it, or lowering it to
-`read`, revokes them too. A `read` key cannot see invites, so plans with pending members
-fail until a `manage` key is configured again; the next apply with one mails every pending
-member a new invite. To rotate the key, roll it in the console: that keeps its id and its
-invites.
+`read`, revokes them too. The key also stops working when the person who created it leaves
+the organization, is removed, loses admin rights or deletes their account, and its invites
+go the same way. A `read` key cannot see invites and a revoked one is refused, so plans
+with pending members fail until a working `manage` key is configured; the next apply with
+one mails every pending member a new invite.
+
+Make the Terraform key from an owner account. To rotate it, roll it in the console: that
+keeps its id and its invites.
 
 ## Example
 

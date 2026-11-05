@@ -56,10 +56,12 @@ func (r *memberResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"changes the member's role and `email` the address PushWard shows for them, an unverified label.\n\n" +
 			"An org admin key grants `member` and `viewer` only. Owners, admins and billing members are managed in the " +
 			"PushWard console; reading or importing one is an error.\n\n" +
-			"Revoking the org admin key, or lowering it from `manage` to `read`, revokes the open invites it sent. A `read` " +
-			"key cannot read invites, so plans with those members fail while it is configured. Once a `manage` key is back in place, they " +
-			"drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it " +
-			"in the console, which keeps its invites, instead of replacing it with a new key.",
+			"Revoking the org admin key, or lowering it from `manage` to `read`, revokes the open invites it sent. The key also " +
+			"stops working when the person who created it leaves the organization, is removed, loses admin rights or deletes " +
+			"their account, and its invites go the same way. A `read` key cannot read invites and a revoked one is refused, " +
+			"so plans with those members fail until a working `manage` key is configured. Then they drop out of the state and " +
+			"the next apply mails each of them a new invite. Make the key from an owner account, and to rotate it, roll it in " +
+			"the console, which keeps its invites, instead of replacing it with a new key.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The user id once joined, the invite id while pending.",
