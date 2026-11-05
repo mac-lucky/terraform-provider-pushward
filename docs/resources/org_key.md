@@ -59,7 +59,7 @@ output "ci_key" {
 ### Optional
 
 - `activity_slugs` (Set of String) Restrict the key to these activity slugs or patterns (trailing `*`). Empty means unrestricted.
-- `expires_at` (String) When the key stops working, an RFC 3339 time in the future. Unset means never.
+- `expires_at` (String) When the key stops working, an RFC 3339 time in the future. Unset means never. An import reads it as PushWard returns it, so when the configuration spells the same time another way (another UTC offset), the first apply after an import rewrites it in place and changes nothing else.
 - `permissions` (Attributes) What the key may do. Organization keys have no device, sharing or account access. (see [below for nested schema](#nestedatt--permissions))
 - `target` (Attributes) Limit the key to these groups and tags: what it sends must target inside them, and it sees only activities and widgets targeted inside them. Unset reaches the whole organization. Changing it replaces the key. (see [below for nested schema](#nestedatt--target))
 - `widget_slugs` (Set of String) Restrict the key to these widget slugs or patterns (trailing `*`). Empty means unrestricted.

@@ -81,6 +81,16 @@ func TestProviderRefusesOtherKeys(t *testing.T) {
 	}
 }
 
+func TestProviderRefusesURLWithoutScheme(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{{
+			Config:      "provider \"pushward\" {\n  api_key = \"hlo_test\"\n  api_url = \"api.pushward.app\"\n}\ndata \"pushward_org\" \"this\" {}\n",
+			ExpectError: regexp.MustCompile(`must be an http or https URL`),
+		}},
+	})
+}
+
 func TestProviderRefusesSeveralOrgs(t *testing.T) {
 	f := newFake(t)
 	f.extraOrgs = 1

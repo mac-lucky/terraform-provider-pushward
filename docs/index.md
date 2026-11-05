@@ -36,5 +36,5 @@ variable "pushward_org_key" {
 
 ### Optional
 
-- `api_key` (String, Sensitive) Org admin key (`hlo_...`). A `manage` key can change things, a `read` key only read them. Defaults to the `PUSHWARD_ORG_API_TOKEN` environment variable.
-- `api_url` (String) API base URL. Defaults to `PUSHWARD_API_URL`, then `https://api.pushward.app`.
+- `api_key` (String, Sensitive) Org admin key (`hlo_...`). A `manage` key acts as an admin. A `read` key acts as a viewer: it reads the organization, members, devices, groups, tags and routing rules, but not sending keys or open invites, so a plan with a `pushward_org_key` or a pending `pushward_org_member` needs a `manage` key. Defaults to the `PUSHWARD_ORG_API_TOKEN` environment variable.
+- `api_url` (String) API base URL. Plain `http://` to anything but this machine gets a warning, since it sends the key unencrypted. Defaults to `PUSHWARD_API_URL`, then `https://api.pushward.app`.

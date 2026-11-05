@@ -2,8 +2,12 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -169,6 +173,29 @@ func TestPOSTNotRetriedOnNetworkError(t *testing.T) {
 	}
 	if calls.Load() != int32(c.MaxAttempts) {
 		t.Errorf("GET sent %d times, want %d", calls.Load(), c.MaxAttempts)
+	}
+}
+
+func TestUntrustedCertificateNotRetried(t *testing.T) {
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.NotFoundHandler())
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "hlo_test", "test") // trusts the system roots, not the test certificate
+	c.BaseWait = time.Millisecond
+	err := c.Do(context.Background(), http.MethodGet, "/orgs", nil, nil)
+	var certErr *tls.CertificateVerificationError
+	if !errors.As(err, &certErr) {
+		t.Fatalf("err = %v, want a certificate error", err)
+	}
+	if n := conns.Load(); n != 1 {
+		t.Errorf("connected %d times, want 1", n)
 	}
 }
 

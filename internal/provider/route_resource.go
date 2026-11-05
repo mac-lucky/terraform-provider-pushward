@@ -82,7 +82,7 @@ func (r *routeResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"note": schema.StringAttribute{
 				MarkdownDescription: "Up to 200 characters.",
 				Optional:            true,
-				Validators:          []validator.String{stringvalidator.UTF8LengthBetween(1, 200)},
+				Validators:          []validator.String{stringvalidator.UTF8LengthBetween(1, 200), trimmed},
 			},
 		},
 	}

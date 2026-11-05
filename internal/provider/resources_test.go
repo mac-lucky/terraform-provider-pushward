@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
@@ -77,6 +78,30 @@ func TestAccGroupNameValidated(t *testing.T) {
 			ExpectError: regexp.MustCompile(`lowercase letters`),
 		}},
 	})
+}
+
+// Text the server would trim or reformat is refused at plan time, before it
+// could leave a value in state that never matches the configuration.
+func TestAccTextValidated(t *testing.T) {
+	f := newFake(t)
+	for _, tc := range []struct{ typ, attrs, want string }{
+		{"pushward_org_group", "name = \"ops\"\ndescription = <<-EOT\n  On call\nEOT", `whitespace`},
+		{"pushward_org_tag", `name = "pager"` + "\n" + `description = " Phones"`, `whitespace`},
+		{"pushward_org_tag", `name = "pager"` + "\n" + `description = "   "`, `whitespace`},
+		{"pushward_org_route", `slug_pattern = "*"` + "\n" + `applies_to = "both"` + "\n" + `note = "All\n"`, `whitespace`},
+		{"pushward_org_key", `name = "ci"` + "\n" + `expires_at = "2027-06-30"`, `RFC 3339`},
+	} {
+		resource.Test(t, resource.TestCase{
+			ProtoV6ProviderFactories: factories,
+			Steps: []resource.TestStep{{
+				Config:      f.config(fmt.Sprintf("resource %q \"x\" {\n%s\n}\n", tc.typ, tc.attrs)),
+				ExpectError: regexp.MustCompile(tc.want),
+			}},
+		})
+	}
+	if n := f.count("POST", ""); n != 0 {
+		t.Errorf("refused configurations created %d things", n)
+	}
 }
 
 func TestAccTag(t *testing.T) {
@@ -253,15 +278,17 @@ resource "pushward_org_group" "ops" { name = "ops" }
 resource "pushward_org_tag" "pager" { name = "pager" }
 resource "pushward_org_key" "mail" { name = "mail" }
 `
-	first := f.config(base + `
+	// A year ahead, written with an offset: the state keeps this spelling.
+	expires := time.Now().In(time.FixedZone("", 3600)).AddDate(1, 0, 0).Truncate(time.Second).Format(time.RFC3339)
+	first := f.config(base + fmt.Sprintf(`
 resource "pushward_org_key" "ci" {
   name           = "ci"
   permissions    = { activities = "update", widgets = "write" }
   activity_slugs = ["deploy-*"]
-  expires_at     = "2030-01-01T01:00:00+01:00"
+  expires_at     = %q
   target         = { group_ids = [pushward_org_group.ops.id] }
 }
-`)
+`, expires))
 	second := f.config(base + `
 resource "pushward_org_key" "ci" {
   name        = "ci-deploy"
@@ -291,7 +318,7 @@ resource "pushward_org_key" "ci" {
 					resource.TestCheckResourceAttr(n, "permissions.emails", "none"),
 					resource.TestCheckTypeSetElemAttr(n, "activity_slugs.*", "deploy-*"),
 					resource.TestCheckResourceAttr(n, "widget_slugs.#", "0"),
-					resource.TestCheckResourceAttr(n, "expires_at", "2030-01-01T01:00:00+01:00"),
+					resource.TestCheckResourceAttr(n, "expires_at", expires),
 					resource.TestCheckTypeSetElemAttrPair(n, "target.group_ids.*", "pushward_org_group.ops", "id"),
 					resource.TestCheckResourceAttr(n, "target.tag_ids.#", "0"),
 					resource.TestCheckResourceAttr("pushward_org_key.mail", "permissions.activities", "manage"),
@@ -312,7 +339,15 @@ resource "pushward_org_key" "ci" {
 					resource.TestCheckNoResourceAttr(n, "expires_at"),
 				),
 			},
-			{ResourceName: n, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"secret"}},
+			{
+				ResourceName: n, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"secret"},
+				ImportStateCheck: func(is []*terraform.InstanceState) error {
+					if v, ok := is[0].Attributes["secret"]; ok {
+						return fmt.Errorf("secret after import = %q, want null", v)
+					}
+					return nil
+				},
+			},
 			{ResourceName: n, ImportState: true, ImportStateKind: resource.ImportBlockWithID},
 			{
 				Config: third,

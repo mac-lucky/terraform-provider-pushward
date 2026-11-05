@@ -44,7 +44,7 @@ resource "pushward_org_member" "team" {
 
 ### Required
 
-- `email` (String) Where the invite is mailed, and the member's label once they join. Lowercase, as PushWard stores it; `lower()` helps.
+- `email` (String) Where the invite is mailed, and the member's label once they join. Lowercase and without surrounding whitespace, as PushWard stores it; `lower(trimspace())` helps.
 - `role` (String) `member` or `viewer`.
 
 ### Read-Only

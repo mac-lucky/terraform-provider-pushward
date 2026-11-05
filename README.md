@@ -11,7 +11,9 @@ PushWard has two kinds of API key, and this provider takes the first:
 
 - `hlo_...` is an org admin key. It manages one organization and sends nothing. A `manage`
   key acts as an admin, a `read` key as a viewer. An owner or admin creates it in the
-  [PushWard console](https://console.pushward.app).
+  [PushWard console](https://console.pushward.app). A viewer cannot read sending keys or
+  open invites, so a plan with a `pushward_org_key` or a pending `pushward_org_member`
+  needs a `manage` key.
 - `hlk_...` keys send activities, notifications and widgets. `pushward_org_key` creates
   them for the organization; your integrations use those.
 

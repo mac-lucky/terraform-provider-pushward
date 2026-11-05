@@ -59,11 +59,12 @@ func (r *memberResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Computed:            true,
 			},
 			"email": schema.StringAttribute{
-				MarkdownDescription: "Where the invite is mailed, and the member's label once they join. Lowercase, as PushWard stores it; `lower()` helps.",
+				MarkdownDescription: "Where the invite is mailed, and the member's label once they join. Lowercase and without surrounding whitespace, as PushWard stores it; `lower(trimspace())` helps.",
 				Required:            true,
 				Validators: []validator.String{
 					stringvalidator.LengthBetween(3, 254),
 					stringvalidator.RegexMatches(noUpper, "must be lowercase: PushWard stores email addresses in lowercase (use lower())"),
+					trimmed,
 				},
 			},
 			"role": schema.StringAttribute{

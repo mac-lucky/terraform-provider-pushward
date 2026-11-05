@@ -5,6 +5,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -160,7 +161,9 @@ func (c *Client) retryWait(ctx context.Context, method string, err error, attemp
 			wait = apiErr.RetryAfter
 		}
 	case errors.As(err, &netErr):
-		if method == http.MethodPost {
+		// A certificate the client refuses is refused again on every try.
+		var certErr *tls.CertificateVerificationError
+		if method == http.MethodPost || errors.As(err, &certErr) {
 			return 0, false
 		}
 	default:

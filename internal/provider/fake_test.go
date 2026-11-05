@@ -285,7 +285,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			var email *string
 			_ = json.Unmarshal(raw, &email)
 			if email != nil {
-				e := strings.ToLower(*email)
+				e := strings.ToLower(strings.TrimSpace(*email))
 				email = &e
 			}
 			m.Email = email
@@ -318,7 +318,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			problem(w, 422, "email.invalid", "email must be a valid email address")
 			return
 		}
-		email := strings.ToLower(*body.Email)
+		email := strings.ToLower(strings.TrimSpace(*body.Email))
 		if f.emailTaken(email) {
 			problem(w, 409, client.CodeMemberEmailTaken, "a member or open invite of this organization already has this email")
 			return
@@ -359,11 +359,13 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		return false
 	}
+	// desc trims, and stores a blank description as none.
 	desc := func(d *string) *string {
-		if d == nil || *d == "" {
+		if d == nil || strings.TrimSpace(*d) == "" {
 			return nil
 		}
-		return d
+		v := strings.TrimSpace(*d)
+		return &v
 	}
 	mux.HandleFunc("POST /orgs/{org}/groups", func(w http.ResponseWriter, r *http.Request) {
 		var body named

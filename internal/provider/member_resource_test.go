@@ -7,15 +7,20 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 const memberName = "pushward_org_member.ann"
 
 func memberConfig(f *fakeAPI, role string) string {
+	return memberEmailConfig(f, "ann@example.com", role)
+}
+
+func memberEmailConfig(f *fakeAPI, email, role string) string {
 	return f.config(fmt.Sprintf(`
 resource "pushward_org_member" "ann" {
-  email = "ann@example.com"
+  email = %q
   role  = %q
 }
 
@@ -23,7 +28,25 @@ resource "pushward_org_group" "team" {
   name       = "team"
   member_ids = compact([pushward_org_member.ann.user_id])
 }
-`, role))
+`, email, role))
+}
+
+func (f *fakeAPI) memberEmail(uid string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if m := f.member(uid); m != nil && m.Email != nil {
+		return *m.Email
+	}
+	return ""
+}
+
+func (f *fakeAPI) inviteEmail(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if inv := f.invites[id]; inv != nil && inv.Email != nil {
+		return *inv.Email
+	}
+	return ""
 }
 
 // onlyOwnerLeft checks that destroy removed every member and closed every
@@ -132,6 +155,114 @@ func TestAccMemberLifecycle(t *testing.T) {
 	})
 }
 
+func TestAccMemberEmailChange(t *testing.T) {
+	f := newFake(t)
+	var firstInvite, invite, userID string
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.onlyOwnerLeft,
+		Steps: []resource.TestStep{
+			{
+				Config: memberEmailConfig(f, "ann@example.com", "member"),
+				Check:  saveAttr(memberName, "invite_id", &firstInvite),
+			},
+			{
+				// While pending, a new email revokes the invite and mails one to the new address.
+				Config: memberEmailConfig(f, "ann@corp.example.com", "member"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(memberName, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(memberName, "status", "pending"),
+					resource.TestCheckResourceAttr(memberName, "email", "ann@corp.example.com"),
+					attrNot(memberName, "invite_id", &firstInvite),
+					saveAttr(memberName, "invite_id", &invite),
+					func(*terraform.State) error {
+						if !f.inviteRevoked(firstInvite) {
+							return fmt.Errorf("the first invite was not revoked")
+						}
+						if got := f.inviteEmail(invite); got != "ann@corp.example.com" {
+							return fmt.Errorf("new invite mailed to %q", got)
+						}
+						return nil
+					},
+				),
+			},
+			{
+				PreConfig: func() { userID = f.join(invite) },
+				Config:    memberEmailConfig(f, "ann@corp.example.com", "member"),
+				Check:     resource.TestCheckResourceAttr(memberName, "status", "joined"),
+			},
+			{
+				// Once joined, a new email only changes the member's label.
+				Config: memberEmailConfig(f, "ann.b@example.com", "member"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(memberName, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(memberName, "email", "ann.b@example.com"),
+					attrIs(memberName, "user_id", &userID),
+					func(*terraform.State) error {
+						if got := f.memberEmail(userID); got != "ann.b@example.com" {
+							return fmt.Errorf("label on the server = %q", got)
+						}
+						if n := f.count("POST", "/invites"); n != 2 {
+							return fmt.Errorf("%d invites sent, want 2", n)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+// A member who joined with a code has no label: importing them and setting
+// email updates them in place instead of removing them.
+func TestAccMemberImportWithoutLabel(t *testing.T) {
+	f := newFake(t)
+	uid := f.addMember("viewer", "")
+	cfg := memberEmailConfig(f, "ann@example.com", "viewer")
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.onlyOwnerLeft,
+		Steps: []resource.TestStep{
+			{
+				Config:             cfg,
+				ResourceName:       memberName,
+				ImportState:        true,
+				ImportStateId:      uid,
+				ImportStatePersist: true,
+				ImportStateCheck: func(is []*terraform.InstanceState) error {
+					if len(is) != 1 || is[0].Attributes["email"] != "" || is[0].Attributes["status"] != "joined" {
+						return fmt.Errorf("imported %+v", is)
+					}
+					return nil
+				},
+			},
+			{
+				Config: cfg,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(memberName, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(memberName, "user_id", uid),
+					resource.TestCheckResourceAttr(memberName, "email", "ann@example.com"),
+					func(*terraform.State) error {
+						if got := f.memberEmail(uid); got != "ann@example.com" {
+							return fmt.Errorf("label on the server = %q", got)
+						}
+						if n := f.count("POST", "/invites"); n != 0 {
+							return fmt.Errorf("%d invites sent, want 0", n)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
 func TestAccMemberExpiredInvite(t *testing.T) {
 	f := newFake(t)
 	var invite string
@@ -179,6 +310,8 @@ func TestAccMemberValidation(t *testing.T) {
 	for _, tc := range []struct{ email, role, want string }{
 		{"ann@example.com", "admin", `value must be one of`},
 		{"Ann@example.com", "member", `must be lowercase`},
+		{" bob@example.com", "member", `whitespace`},
+		{"ann@example.com\r", "member", `whitespace`},
 	} {
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: factories,

@@ -134,8 +134,11 @@ func (r *keyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"activity_slugs": slugs("Restrict the key to these activity slugs or patterns (trailing `*`)."),
 			"widget_slugs":   slugs("Restrict the key to these widget slugs or patterns (trailing `*`)."),
 			"expires_at": schema.StringAttribute{
-				MarkdownDescription: "When the key stops working, an RFC 3339 time in the future. Unset means never.",
-				Optional:            true,
+				MarkdownDescription: "When the key stops working, an RFC 3339 time in the future. Unset means never. " +
+					"An import reads it as PushWard returns it, so when the configuration spells the same time another way " +
+					"(another UTC offset), the first apply after an import rewrites it in place and changes nothing else.",
+				Optional:   true,
+				Validators: []validator.String{rfc3339},
 			},
 			"target": schema.SingleNestedAttribute{
 				MarkdownDescription: "Limit the key to these groups and tags: what it sends must target inside them, and it sees " +

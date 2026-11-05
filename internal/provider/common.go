@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/mac-lucky/terraform-provider-pushward/internal/client"
@@ -57,4 +60,35 @@ func emptySet() types.Set { return types.SetValueMust(types.StringType, []attr.V
 func clearable(s types.String) *string {
 	v := s.ValueString()
 	return &v
+}
+
+// check is a string validator from a predicate; rule completes "must ...".
+type check struct {
+	rule string
+	ok   func(string) bool
+}
+
+func (c check) Description(context.Context) string { return "must " + c.rule }
+
+func (c check) MarkdownDescription(ctx context.Context) string { return c.Description(ctx) }
+
+func (c check) ValidateString(ctx context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	v := req.ConfigValue
+	if v.IsNull() || v.IsUnknown() || c.ok(v.ValueString()) {
+		return
+	}
+	resp.Diagnostics.AddAttributeError(req.Path, "Invalid Attribute Value",
+		fmt.Sprintf("Attribute %s %s, got: %q", req.Path, c.Description(ctx), v.ValueString()))
+}
+
+// trimmed refuses what the server would trim: the stored value would never
+// match the configuration.
+var trimmed = check{
+	rule: "not start or end with whitespace, which PushWard trims (trimspace() or chomp() help)",
+	ok:   func(s string) bool { return strings.TrimSpace(s) == s },
+}
+
+var rfc3339 = check{
+	rule: "be an RFC 3339 time, such as 2027-01-31T00:00:00Z",
+	ok:   func(s string) bool { _, err := time.Parse(time.RFC3339, s); return err == nil },
 }

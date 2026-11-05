@@ -3,7 +3,9 @@ package provider
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -48,14 +50,17 @@ func (p *pushwardProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 			"[PushWard console](https://console.pushward.app). The organization is the key's own.",
 		Attributes: map[string]schema.Attribute{
 			"api_key": schema.StringAttribute{
-				MarkdownDescription: "Org admin key (`hlo_...`). A `manage` key can change things, a `read` key only read them. " +
+				MarkdownDescription: "Org admin key (`hlo_...`). A `manage` key acts as an admin. A `read` key acts as a viewer: " +
+					"it reads the organization, members, devices, groups, tags and routing rules, but not sending keys or open " +
+					"invites, so a plan with a `pushward_org_key` or a pending `pushward_org_member` needs a `manage` key. " +
 					"Defaults to the `PUSHWARD_ORG_API_TOKEN` environment variable.",
 				Optional:  true,
 				Sensitive: true,
 			},
 			"api_url": schema.StringAttribute{
-				MarkdownDescription: "API base URL. Defaults to `PUSHWARD_API_URL`, then `" + client.DefaultURL + "`.",
-				Optional:            true,
+				MarkdownDescription: "API base URL. Plain `http://` to anything but this machine gets a warning, since it sends the key unencrypted. " +
+					"Defaults to `PUSHWARD_API_URL`, then `" + client.DefaultURL + "`.",
+				Optional: true,
 			},
 		},
 	}
@@ -82,6 +87,16 @@ func (p *pushwardProvider) Configure(ctx context.Context, req provider.Configure
 	}
 	if !cfg.APIURL.IsNull() {
 		baseURL = cfg.APIURL.ValueString()
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		resp.Diagnostics.AddAttributeError(path.Root("api_url"), "Invalid API URL",
+			"api_url (or PUSHWARD_API_URL) must be an http or https URL such as "+client.DefaultURL+", got "+strconv.Quote(baseURL)+".")
+		return
+	}
+	if ip := net.ParseIP(u.Hostname()); u.Scheme == "http" && u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		resp.Diagnostics.AddAttributeWarning(path.Root("api_url"), "API URL is not https",
+			"The org admin key is sent unencrypted to "+u.Host+". Use https unless the server is on this machine.")
 	}
 	if key == "" {
 		resp.Diagnostics.AddAttributeError(path.Root("api_key"), "Missing org admin key",

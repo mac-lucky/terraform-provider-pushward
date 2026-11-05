@@ -50,7 +50,7 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"description": schema.StringAttribute{
 				MarkdownDescription: "Up to 200 characters.",
 				Optional:            true,
-				Validators:          []validator.String{stringvalidator.UTF8LengthBetween(1, 200)},
+				Validators:          []validator.String{stringvalidator.UTF8LengthBetween(1, 200), trimmed},
 			},
 			"member_ids": schema.SetAttribute{
 				MarkdownDescription: "User ids of every member of the group. The set replaces the current members; empty by default.",
