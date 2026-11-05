@@ -7,7 +7,7 @@ description: |-
   Creating one mails a one-use invite; the member is pending until the person joins with it, then joined with a user_id. Terraform notices on the next plan. An invite that expires, is revoked or is used up before anyone joins, and a member who leaves or is removed, drop out of the state, so the next apply invites them again.
   While pending, changing email or role revokes the invite and mails a new one. Once joined, role changes the member's role and email the address PushWard shows for them, an unverified label.
   An org admin key grants member and viewer only. Owners, admins and billing members are managed in the PushWard console; reading or importing one is an error.
-  Revoking the org admin key, or lowering it from manage to read, revokes the open invites it sent: those members drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it in the console, which keeps its invites, instead of replacing it with a new key.
+  Revoking the org admin key, or lowering it from manage to read, revokes the open invites it sent. A read key cannot read invites, so plans with those members fail while it is configured. Once a manage key is back in place, they drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it in the console, which keeps its invites, instead of replacing it with a new key.
 ---
 
 # pushward_org_member (Resource)
@@ -20,7 +20,7 @@ While pending, changing `email` or `role` revokes the invite and mails a new one
 
 An org admin key grants `member` and `viewer` only. Owners, admins and billing members are managed in the PushWard console; reading or importing one is an error.
 
-Revoking the org admin key, or lowering it from `manage` to `read`, revokes the open invites it sent: those members drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it in the console, which keeps its invites, instead of replacing it with a new key.
+Revoking the org admin key, or lowering it from `manage` to `read`, revokes the open invites it sent. A `read` key cannot read invites, so plans with those members fail while it is configured. Once a `manage` key is back in place, they drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it in the console, which keeps its invites, instead of replacing it with a new key.
 
 ## Example Usage
 

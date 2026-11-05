@@ -22,8 +22,10 @@ Each resource records it in `org_id`. A key of another organization is an error,
 plan that creates everything again over there.
 
 The open invites a `manage` key sent belong to that key. Revoking it, or lowering it to
-`read`, revokes them too, and the next apply mails every pending member a new invite. To
-rotate the key, roll it in the console: that keeps its id and its invites.
+`read`, revokes them too. A `read` key cannot see invites, so plans with pending members
+fail until a `manage` key is configured again; the next apply with one mails every pending
+member a new invite. To rotate the key, roll it in the console: that keeps its id and its
+invites.
 
 ## Example
 

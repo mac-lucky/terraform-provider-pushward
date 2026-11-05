@@ -33,9 +33,9 @@ type memberModel struct {
 	OrgID    types.String `tfsdk:"org_id"`
 }
 
-// manageable mirrors the server's OrgRoleCanManage for an admin, which is
-// what a manage key acts as: owners, admins and billing members are the
-// owners' to manage.
+// manageable reports whether a manage key, which acts as an admin, may manage
+// a member with role: an admin manages members and viewers only, and owners,
+// admins and billing members are the owners' to manage.
 func manageable(role string) bool { return role == "member" || role == "viewer" }
 
 var _ resource.ResourceWithModifyPlan = &memberResource{}
@@ -56,8 +56,9 @@ func (r *memberResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"changes the member's role and `email` the address PushWard shows for them, an unverified label.\n\n" +
 			"An org admin key grants `member` and `viewer` only. Owners, admins and billing members are managed in the " +
 			"PushWard console; reading or importing one is an error.\n\n" +
-			"Revoking the org admin key, or lowering it from `manage` to `read`, revokes the open invites it sent: those " +
-			"members drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it " +
+			"Revoking the org admin key, or lowering it from `manage` to `read`, revokes the open invites it sent. A `read` " +
+			"key cannot read invites, so plans with those members fail while it is configured. Once a `manage` key is back in place, they " +
+			"drop out of the state and the next apply mails each of them a new invite. To rotate the key, roll it " +
 			"in the console, which keeps its invites, instead of replacing it with a new key.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
