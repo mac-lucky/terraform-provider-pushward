@@ -1,0 +1,15 @@
+# Binaries
+terraform-provider-pushward
+dist/
+*.exe
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
