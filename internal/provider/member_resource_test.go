@@ -325,6 +325,18 @@ func TestAccMemberUnmanageableRole(t *testing.T) {
 	if got := f.memberRole(uid); got != "admin" {
 		t.Errorf("role on the server = %q", got)
 	}
+	// An open admin invite imported by email: the error names the invite.
+	f.addInvite("boss@example.com", "admin", nil)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{{
+			Config:        memberEmailConfig(f, "boss@example.com", "member"),
+			ResourceName:  memberName,
+			ImportState:   true,
+			ImportStateId: "boss@example.com",
+			ExpectError:   regexp.MustCompile(`(?s)open\s+invite\s+for\s+boss@example\.com\s+has\s+the\s+admin\s+role.*console`),
+		}},
+	})
 }
 
 func TestAccMemberEmailTaken(t *testing.T) {

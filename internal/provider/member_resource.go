@@ -284,8 +284,13 @@ func (r *memberResource) Read(ctx context.Context, req resource.ReadRequest, res
 	// A role change would only meet 403 on every apply. Import reads too, so
 	// this refuses importing such a member as well.
 	if role := state.Role.ValueString(); !manageable(role) {
+		who := "User " + state.UserID.ValueString()
+		if state.UserID.ValueString() == "" {
+			// An open invite, imported by email.
+			who = "The open invite for " + state.Email.ValueString()
+		}
 		resp.Diagnostics.AddError("Manage this person in the console",
-			"User "+state.UserID.ValueString()+" has the "+role+" role in the organization. An org admin key manages members and viewers only: "+
+			who+" has the "+role+" role in the organization. An org admin key manages members and viewers only: "+
 				"manage this person in the PushWard console at https://console.pushward.app, and remove the resource from the "+
 				"configuration and the state (terraform state rm).")
 		return
