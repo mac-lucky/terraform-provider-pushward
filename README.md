@@ -84,6 +84,14 @@ An admin key cannot do everything an owner can, on purpose. The organization's n
 - org admin keys themselves
 - deleting the organization
 
+## Retries
+
+A request that gets a 429 or 503, or loses its connection, is tried up to five times. Creates
+send an `Idempotency-Key`, so when the connection drops after PushWard made the rule, group,
+tag, invite or key, the retry gets that one back instead of making a second (and mails no
+second invite). A key comes back from such a retry without its secret, which PushWard shows
+only once, so the provider rolls it once and keeps the new secret.
+
 ## Building and testing
 
 Go (the version in `go.mod`) and Terraform 1.5 or newer.
