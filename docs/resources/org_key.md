@@ -4,7 +4,7 @@ page_title: "pushward_org_key Resource - pushward"
 subcategory: ""
 description: |-
   A sending key (hlk_...) owned by the organization. What it sends reaches the members the organization's routing rules allow, and its emails the organization's verified recipients.
-  secret is returned once, when the key is created, and kept in the state; it is null after an import. target is fixed at creation, so changing it replaces the key.
+  secret is returned once, when the key is created, and kept in the state; it is null after an import. A create retried after a lost response gets the key without its secret, so the provider rolls it once and keeps that secret. target is fixed at creation, so changing it replaces the key.
   To rotate the secret in place, change rotation_triggers: the key keeps its id and gets a new secret, and the old secret stops working at once. After an import, setting rotation_triggers rolls the secret and puts the new one in the state. Replacing the key, for example with lifecycle { replace_triggered_by = [...] }, also gives a new secret, on a new key id.
 ---
 
@@ -12,7 +12,7 @@ description: |-
 
 A sending key (`hlk_...`) owned by the organization. What it sends reaches the members the organization's routing rules allow, and its emails the organization's verified recipients.
 
-`secret` is returned once, when the key is created, and kept in the state; it is null after an import. `target` is fixed at creation, so changing it replaces the key.
+`secret` is returned once, when the key is created, and kept in the state; it is null after an import. A create retried after a lost response gets the key without its secret, so the provider rolls it once and keeps that secret. `target` is fixed at creation, so changing it replaces the key.
 
 To rotate the secret in place, change `rotation_triggers`: the key keeps its id and gets a new secret, and the old secret stops working at once. After an import, setting `rotation_triggers` rolls the secret and puts the new one in the state. Replacing the key, for example with `lifecycle { replace_triggered_by = [...] }`, also gives a new secret, on a new key id.
 

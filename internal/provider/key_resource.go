@@ -112,6 +112,8 @@ func (r *keyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 		MarkdownDescription: "A sending key (`hlk_...`) owned by the organization. What it sends reaches the members the " +
 			"organization's routing rules allow, and its emails the organization's verified recipients.\n\n" +
 			"`secret` is returned once, when the key is created, and kept in the state; it is null after an import. " +
+			"A create retried after a lost response gets the key without its secret, so the provider rolls it once " +
+			"and keeps that secret. " +
 			"`target` is fixed at creation, so changing it replaces the key.\n\n" +
 			"To rotate the secret in place, change `rotation_triggers`: the key keeps its id and gets a new secret, and " +
 			"the old secret stops working at once. After an import, setting `rotation_triggers` rolls the secret and puts " +
@@ -312,6 +314,18 @@ func (r *keyResource) Create(ctx context.Context, req resource.CreateRequest, re
 		return
 	}
 	plan.set(&k)
+	// A retry after a lost response gets the key without its secret, which the server shows only once.
+	if k.Secret == nil {
+		plan.Secret = types.StringNull()
+		// Saved first, so that a failed roll leaves the key tainted in state instead of orphaned.
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+		var rolled client.Key
+		if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("keys", k.ID, "roll"), nil, &rolled); err != nil {
+			resp.Diagnostics.AddError("Rolling the new key's secret failed", err.Error())
+			return
+		}
+		plan.Secret = types.StringPointerValue(rolled.Secret)
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
