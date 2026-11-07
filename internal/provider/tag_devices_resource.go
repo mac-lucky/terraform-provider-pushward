@@ -54,7 +54,10 @@ func (r *tagDevicesResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"set in the PushWard console or app.\n\n" +
 			"`devices` replaces the tag's devices, including ones tagged in the app or console: an apply takes the tag off " +
 			"every device the set leaves out. A device that unregisters drops out of the set, so build the set from " +
-			"`data.pushward_org_devices` rather than hard-coding device ids. Destroying it takes the tag off its devices.",
+			"`data.pushward_org_devices` rather than hard-coding device ids. Destroying it takes the tag off its devices.\n\n" +
+			"PushWard tags a phone, not a row: a phone that registered again under a new device id has several rows " +
+			"that share its push token, and they gain and lose a tag together. List all of a phone's rows or none; an " +
+			"apply that lists only some fails, names the missing rows and leaves the phone tagged.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The tag id.",
@@ -163,11 +166,52 @@ func (r *tagDevicesResource) apply(ctx context.Context, plan *tagDevicesModel, d
 			"Tag "+tagID+" is not a tag of the organization. Use the id of a pushward_org_tag, or one from the pushward_org_tags data source.")
 		return
 	}
-	if err := r.post(ctx, tagID, minus(want, cur), minus(cur, want)); err != nil {
-		diags.AddError("Setting the tag's devices failed", err.Error())
-		return
+	add, remove := minus(want, cur), minus(cur, want)
+	if len(add)+len(remove) > 0 {
+		if err := r.post(ctx, tagID, add, remove); err != nil {
+			diags.AddError("Setting the tag's devices failed", err.Error())
+			return
+		}
+		if !r.settled(ctx, tagID, want, diags) {
+			return
+		}
 	}
 	plan.ID = plan.TagID
+}
+
+// settled checks that exactly the want devices carry the tag. PushWard tags a
+// phone, not a row: a member's rows that share a push token (a phone that
+// registered again under a new device id) gain and lose a tag together, so a
+// set naming only some of a phone's rows can never hold. When a remove took
+// the tag off a wanted row that way, settled puts it back on that phone, then
+// names the rows the set must add.
+func (r *tagDevicesResource) settled(ctx context.Context, tagID string, want []deviceRef, diags *diag.Diagnostics) bool {
+	after, _, err := r.current(ctx, tagID)
+	if lost := minus(want, after); err == nil && len(lost) > 0 {
+		if err = r.post(ctx, tagID, lost, nil); err == nil {
+			after, _, err = r.current(ctx, tagID)
+		}
+	}
+	if err != nil {
+		diags.AddError("Setting the tag's devices failed", err.Error())
+		return false
+	}
+	var rows []string
+	for _, d := range minus(after, want) {
+		rows = append(rows, "carries the tag but is not in devices: user_id "+d.UserID+", device_id "+d.DeviceID)
+	}
+	for _, d := range minus(want, after) {
+		rows = append(rows, "is in devices but does not carry the tag: user_id "+d.UserID+", device_id "+d.DeviceID)
+	}
+	if len(rows) == 0 {
+		return true
+	}
+	diags.AddError("Some rows of a phone are missing from devices",
+		"PushWard tags a phone as a whole: the rows of a member that share a push token (a phone that registered again "+
+			"under a new device id) gain and lose a tag together. After the change:\n\n  "+strings.Join(rows, "\n  ")+
+			"\n\nList every row of such a phone in devices, or none of them. A set built from data.pushward_org_devices "+
+			"by user_id lists every row.")
+	return false
 }
 
 func (r *tagDevicesResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {

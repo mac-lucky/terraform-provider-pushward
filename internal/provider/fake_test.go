@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,6 +44,9 @@ type fakeAPI struct {
 	devices  []client.Device
 	pageSize int
 	requests []string
+	// phone maps a device id to the first row of its phone, for rows that
+	// share a push token (a phone that registered again).
+	phone map[string]string
 }
 
 func newFake(t *testing.T) *fakeAPI {
@@ -54,6 +58,7 @@ func newFake(t *testing.T) *fakeAPI {
 		groups:   map[string]*client.Group{},
 		tags:     map[string]*client.Tag{},
 		keys:     map[string]*client.Key{},
+		phone:    map[string]string{},
 		pageSize: 2,
 	}
 	owner := "Owner"
@@ -289,6 +294,15 @@ func (f *fakeAPI) addDevice(uid, deviceID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.devices = append(f.devices, client.Device{UserID: uid, DeviceID: deviceID, Delivery: true, TagIDs: []string{}, CreatedAt: time.Now().UTC()})
+}
+
+// addTwin registers deviceID for member uid as another row of the phone
+// that has row of: the phone registered again under a new device id.
+func (f *fakeAPI) addTwin(uid, deviceID, of string) {
+	f.addDevice(uid, deviceID)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.phone[deviceID] = of
 }
 
 // removeDevice unregisters a device.
@@ -691,12 +705,25 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 				return
 			}
 		}
-		for _, d := range body.Remove {
-			dv := &f.devices[find(d)]
+		// rows is every row of the refs' phones, as the server expands each
+		// ref to the member's rows that share its push token.
+		phoneOf := func(id string) string { return cmp.Or(f.phone[id], id) }
+		rows := func(refs []deviceRef) (out []*client.Device) {
+			for _, d := range refs {
+				ref := f.devices[find(d)]
+				for i, dv := range f.devices {
+					if dv.UserID == ref.UserID && phoneOf(dv.DeviceID) == phoneOf(ref.DeviceID) {
+						out = append(out, &f.devices[i])
+					}
+				}
+			}
+			return out
+		}
+		for _, dv := range rows(body.Remove) {
 			dv.TagIDs = slices.DeleteFunc(dv.TagIDs, func(id string) bool { return id == t.ID })
 		}
-		for _, d := range body.Add {
-			if dv := &f.devices[find(d)]; !slices.Contains(dv.TagIDs, t.ID) {
+		for _, dv := range rows(body.Add) {
+			if !slices.Contains(dv.TagIDs, t.ID) {
 				dv.TagIDs = append(dv.TagIDs, t.ID)
 			}
 		}

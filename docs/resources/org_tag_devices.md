@@ -5,6 +5,7 @@ subcategory: ""
 description: |-
   The devices that carry one tag. Declare at most one per tag; tags without one keep the devices set in the PushWard console or app.
   devices replaces the tag's devices, including ones tagged in the app or console: an apply takes the tag off every device the set leaves out. A device that unregisters drops out of the set, so build the set from data.pushward_org_devices rather than hard-coding device ids. Destroying it takes the tag off its devices.
+  PushWard tags a phone, not a row: a phone that registered again under a new device id has several rows that share its push token, and they gain and lose a tag together. List all of a phone's rows or none; an apply that lists only some fails, names the missing rows and leaves the phone tagged.
 ---
 
 # pushward_org_tag_devices (Resource)
@@ -12,6 +13,8 @@ description: |-
 The devices that carry one tag. Declare at most one per tag; tags without one keep the devices set in the PushWard console or app.
 
 `devices` replaces the tag's devices, including ones tagged in the app or console: an apply takes the tag off every device the set leaves out. A device that unregisters drops out of the set, so build the set from `data.pushward_org_devices` rather than hard-coding device ids. Destroying it takes the tag off its devices.
+
+PushWard tags a phone, not a row: a phone that registered again under a new device id has several rows that share its push token, and they gain and lose a tag together. List all of a phone's rows or none; an apply that lists only some fails, names the missing rows and leaves the phone tagged.
 
 ## Example Usage
 
