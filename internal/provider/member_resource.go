@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -102,10 +103,49 @@ func (r *memberResource) Configure(_ context.Context, req resource.ConfigureRequ
 	r.c = providerClient(req.ProviderData, &resp.Diagnostics)
 }
 
-// ImportState takes a user id.
+// ImportState takes a user id, or an email: the member with that email, else
+// the open invite mailed to it.
 func (r *memberResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("user_id"), req.ID)...)
+	if !strings.Contains(req.ID, "@") {
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("user_id"), req.ID)...)
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(req.ID))
+	members, err := client.List[client.Member](ctx, r.c, r.c.OrgPath("members"))
+	if err != nil {
+		resp.Diagnostics.AddError("Listing the members failed", err.Error())
+		return
+	}
+	for _, m := range members {
+		if m.Email != nil && strings.EqualFold(*m.Email, email) {
+			resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), m.UserID)...)
+			resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("user_id"), m.UserID)...)
+			return
+		}
+	}
+	invites, err := client.List[client.Invite](ctx, r.c, r.c.OrgPath("invites"))
+	if err != nil {
+		resp.Diagnostics.AddError("Listing the invites failed", "Importing a pending member by email reads the open invites, which needs a manage key.\n\n"+err.Error())
+		return
+	}
+	for _, inv := range invites {
+		if inv.Email != nil && strings.EqualFold(*inv.Email, email) && openInvite(&inv) {
+			resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), inv.ID)...)
+			resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("invite_id"), inv.ID)...)
+			return
+		}
+	}
+	resp.Diagnostics.AddError("No member or open invite has this email",
+		"The organization has no member with the email "+email+" and no open invite mailed to it. "+
+			"Check the address, or import by user id (pushward_org_members lists them).")
+}
+
+// openInvite reports whether someone can still join with inv: nobody has, and
+// it is not revoked, expired or used up.
+func openInvite(inv *client.Invite) bool {
+	return (inv.RedeemedBy == nil || *inv.RedeemedBy == "") && inv.RevokedAt == nil &&
+		time.Now().Before(inv.ExpiresAt) && inv.Uses < inv.MaxUses
 }
 
 // ModifyPlan keeps the computed attributes of a joined member, which an
@@ -159,7 +199,7 @@ func (r *memberResource) resolve(ctx context.Context, m *memberModel) (gone bool
 		if inv.RedeemedBy == nil || *inv.RedeemedBy == "" {
 			// Used up with nobody to show for it: whoever joined deleted
 			// their account. Nobody can join with it any more.
-			if inv.RevokedAt != nil || !time.Now().Before(inv.ExpiresAt) || inv.Uses >= inv.MaxUses {
+			if !openInvite(&inv) {
 				return true, nil
 			}
 			m.ID = types.StringValue(inv.ID)
@@ -204,8 +244,9 @@ func inviteFailed(diags *diag.Diagnostics, email string, err error) {
 	if client.HasCode(err, client.CodeMemberEmailTaken) {
 		diags.AddError("A member or open invite already has this email",
 			"The organization already has a member or an open invite with "+email+". "+
-				"Import the member with `terraform import <address> <user_id>` (the user id is in the console or the "+
-				"pushward_org_members data source), or revoke the open invite in the PushWard console.\n\n"+err.Error())
+				"Import it with `terraform import <address> "+email+"`, which finds the member or else the open invite, "+
+				"or by user id with `terraform import <address> <user_id>` (the console and the pushward_org_members data "+
+				"source list them), or revoke the open invite in the PushWard console.\n\n"+err.Error())
 		return
 	}
 	diags.AddError("Inviting the member failed", err.Error())

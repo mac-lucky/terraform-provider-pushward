@@ -15,7 +15,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 
 	"github.com/mac-lucky/terraform-provider-pushward/internal/client"
 )
@@ -110,6 +112,11 @@ func TestAccPlanTimeValidation(t *testing.T) {
 		{"pushward_org_route", `slug_pattern = "*"` + "\n" + `applies_to = "both"` + "\n" + `allow_group_ids = ` + upper, `must be lowercase`},
 		{"pushward_org_route", `slug_pattern = "*"` + "\n" + `applies_to = "both"` + "\n" + `allow_tag_ids = ` + upper, `must be lowercase`},
 		{"pushward_org_route_order", `route_ids = ` + upper, `must be lowercase`},
+		{"pushward_org_tag_devices", `tag_id = "0B000000-0000-4000-8000-000000000001"` + "\n" + `devices = []`, `must be lowercase`},
+		{"pushward_org_tag_devices", `tag_id = "t"` + "\n" + `devices = [{ user_id = "0B000000-0000-4000-8000-000000000001", device_id = "d" }]`, `must be lowercase`},
+		{"pushward_org_settings", `name = " Acme"`, `whitespace`},
+		{"pushward_org_settings", `name = "` + strings.Repeat("a", 51) + `"`, `between 1 and 50`},
+		{"pushward_org_settings", `name = ""`, `between 1 and 50`},
 	} {
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: factories,
@@ -424,6 +431,9 @@ func TestAccOtherOrgKeyKeepsState(t *testing.T) {
 		{"pushward_org_route_order.x", `resource "pushward_org_route_order" "x" { route_ids = [] }`},
 		{"pushward_org_key.x", `resource "pushward_org_key" "x" { name = "ci" }`},
 		{"pushward_org_member.x", "resource \"pushward_org_member\" \"x\" {\n  email = \"ann@example.com\"\n  role = \"member\"\n}"},
+		{"pushward_org_tag_devices.x", "resource \"pushward_org_tag\" \"t\" { name = \"pager\" }\n" +
+			"resource \"pushward_org_tag_devices\" \"x\" {\n  tag_id = pushward_org_tag.t.id\n  devices = []\n}"},
+		{"pushward_org_settings.x", `resource "pushward_org_settings" "x" { name = "Acme" }`},
 	} {
 		t.Run(tc.addr, func(t *testing.T) {
 			a, b := newFake(t), newFake(t)
@@ -479,8 +489,8 @@ func TestOtherOrgKeyUpdateDelete(t *testing.T) {
 			del := fwresource.DeleteResponse{State: newState()}
 			r.Delete(ctx, fwresource.DeleteRequest{State: st}, &del)
 			ops := map[string]diag.Diagnostics{"Update": upd.Diagnostics}
-			// The order's Delete sends nothing at all; the request check below covers it.
-			if md.TypeName != "pushward_org_route_order" {
+			// These Deletes send nothing at all; the request check below covers them.
+			if md.TypeName != "pushward_org_route_order" && md.TypeName != "pushward_org_settings" {
 				ops["Delete"] = del.Diagnostics
 			}
 			for op, diags := range ops {
@@ -542,4 +552,197 @@ resource "pushward_org_route_order" "this" {
 			ExpectError: regexp.MustCompile(`(?s)route_ids must name every routing rule.*Missing:\s+\S+ \(b-\*\)`),
 		}},
 	})
+}
+
+func TestAccKeyRoll(t *testing.T) {
+	f := newFake(t)
+	const n = "pushward_org_key.ci"
+	cfg := func(triggers string) string {
+		return f.config("resource \"pushward_org_key\" \"ci\" {\n  name = \"ci\"\n" + triggers + "}\n")
+	}
+	// requests checks how many rolls and PATCHes the fake got.
+	requests := func(rolls, patches int) resource.TestCheckFunc {
+		return func(*terraform.State) error {
+			if got := f.count("POST", "/roll"); got != rolls {
+				return fmt.Errorf("%d rolls, want %d", got, rolls)
+			}
+			if got := f.count("PATCH", ""); got != patches {
+				return fmt.Errorf("%d PATCHes, want %d", got, patches)
+			}
+			return nil
+		}
+	}
+	var id, secret string
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.empty,
+		Steps: []resource.TestStep{
+			{
+				// Creating the key never rolls it.
+				Config: cfg(`  rotation_triggers = { rotated = "2026-11" }` + "\n"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(n, "rotation_triggers.rotated", "2026-11"),
+					saveAttr(n, "id", &id),
+					saveAttr(n, "secret", &secret),
+					requests(0, 0),
+				),
+			},
+			{
+				Config: cfg(`  rotation_triggers = { rotated = "2026-12" }` + "\n"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(n, plancheck.ResourceActionUpdate),
+						plancheck.ExpectUnknownValue(n, tfjsonpath.New("secret")),
+					},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					attrIs(n, "id", &id),
+					attrNot(n, "secret", &secret),
+					resource.TestMatchResourceAttr(n, "secret", regexp.MustCompile(`^hlk_`)),
+					saveAttr(n, "secret", &secret),
+					requests(1, 0),
+				),
+			},
+			{
+				// A rename with the same triggers PATCHes and keeps the secret.
+				Config: f.config("resource \"pushward_org_key\" \"ci\" {\n  name = \"ci-deploy\"\n  rotation_triggers = { rotated = \"2026-12\" }\n}\n"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					attrIs(n, "secret", &secret),
+					resource.TestCheckResourceAttr(n, "name", "ci-deploy"),
+					requests(1, 1),
+				),
+			},
+			{
+				// Removing the triggers does not roll.
+				Config: f.config("resource \"pushward_org_key\" \"ci\" {\n  name = \"ci-deploy\"\n}\n"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(n, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					attrIs(n, "id", &id),
+					attrIs(n, "secret", &secret),
+					resource.TestCheckNoResourceAttr(n, "rotation_triggers.%"),
+					requests(1, 1),
+				),
+			},
+		},
+	})
+}
+
+// An imported key has no secret; setting rotation_triggers rolls one into the
+// state.
+func TestAccKeyRollAfterImport(t *testing.T) {
+	ctx := context.Background()
+	f := newFake(t)
+	c := client.New(f.srv.URL, "hlo_test", "test")
+	c.OrgID = f.org.ID
+	var k client.Key
+	if err := c.Do(ctx, "POST", c.OrgPath("keys"), map[string]any{"name": "ci"}, &k); err != nil {
+		t.Fatal(err)
+	}
+	const n = "pushward_org_key.ci"
+	cfg := func(triggers string) string {
+		return f.config("resource \"pushward_org_key\" \"ci\" {\n  name = \"ci\"\n" + triggers + "}\n")
+	}
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.empty,
+		Steps: []resource.TestStep{
+			{
+				Config:             cfg(""),
+				ResourceName:       n,
+				ImportState:        true,
+				ImportStateId:      k.ID,
+				ImportStatePersist: true,
+				ImportStateCheck: func(is []*terraform.InstanceState) error {
+					if v, ok := is[0].Attributes["secret"]; ok {
+						return fmt.Errorf("secret after import = %q, want null", v)
+					}
+					return nil
+				},
+			},
+			{
+				Config: cfg(`  rotation_triggers = { rotated = "2026-11" }` + "\n"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(n, "id", k.ID),
+					resource.TestMatchResourceAttr(n, "secret", regexp.MustCompile(`^hlk_`)),
+					func(s *terraform.State) error {
+						if got := s.RootModule().Resources[n].Primary.Attributes["secret"]; got == *k.Secret {
+							return fmt.Errorf("secret was not rolled")
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+func TestAccOrgSettings(t *testing.T) {
+	f := newFake(t)
+	const n = "pushward_org_settings.this"
+	cfg := func(name string) string {
+		return f.config(fmt.Sprintf("resource \"pushward_org_settings\" \"this\" {\n  name = %q\n}\n", name))
+	}
+	nameIs := func(want string) func(*terraform.State) error {
+		return func(*terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.org.Name != want {
+				return fmt.Errorf("organization name on the server = %q, want %q", f.org.Name, want)
+			}
+			return nil
+		}
+	}
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		// Destroy sends nothing: the name stays.
+		CheckDestroy: nameIs("Acme Inc"),
+		Steps: []resource.TestStep{
+			{
+				Config: cfg("Acme Corp"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(n, "id", f.org.ID),
+					resource.TestCheckResourceAttr(n, "name", "Acme Corp"),
+					nameIs("Acme Corp"),
+				),
+			},
+			{Config: cfg("Acme Inc"), Check: nameIs("Acme Inc")},
+			{ResourceName: n, ImportState: true, ImportStateId: "settings", ImportStateVerify: true},
+			{ResourceName: n, ImportState: true, ImportStateId: "settings", ImportStateKind: resource.ImportBlockWithID},
+			{
+				// Renamed in the console: the next apply puts it back.
+				PreConfig: func() {
+					f.mu.Lock()
+					f.org.Name = "Other"
+					f.mu.Unlock()
+				},
+				Config: cfg("Acme Inc"),
+				Check:  nameIs("Acme Inc"),
+			},
+		},
+	})
+	if n := f.count("DELETE", ""); n != 0 {
+		t.Errorf("destroy sent %d DELETEs", n)
+	}
+}
+
+// A name a group or tag made outside Terraform already has: the error says
+// how to import it.
+func TestAccNameTakenNamesImport(t *testing.T) {
+	f := newFake(t)
+	f.addGroup("ops")
+	f.addTag("pager")
+	for _, tc := range []struct{ body, want string }{
+		{`resource "pushward_org_group" "ops" { name = "ops" }`, `group\s+named\s+ops.*terraform\s+import.*pushward_org_groups.*org\.name_taken`},
+		{`resource "pushward_org_tag" "pager" { name = "pager" }`, `tag\s+named\s+pager.*terraform\s+import.*pushward_org_tags.*org\.name_taken`},
+	} {
+		resource.Test(t, resource.TestCase{
+			ProtoV6ProviderFactories: factories,
+			Steps: []resource.TestStep{{
+				Config:      f.config(tc.body),
+				ExpectError: regexp.MustCompile(`(?s)` + tc.want),
+			}},
+		})
+	}
 }

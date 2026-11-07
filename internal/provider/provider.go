@@ -45,7 +45,7 @@ func (p *pushwardProvider) Metadata(_ context.Context, _ provider.MetadataReques
 
 func (p *pushwardProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a PushWard organization: members, groups, device tags, routing rules and sending keys. " +
+		MarkdownDescription: "Manages a PushWard organization: its name, members, groups, device tags and the devices carrying them, routing rules and sending keys. " +
 			"It authenticates with an org admin key (`hlo_...`), which an owner or admin creates in the " +
 			"[PushWard console](https://console.pushward.app). The organization is the key's own.",
 		Attributes: map[string]schema.Attribute{
@@ -136,6 +136,8 @@ func (p *pushwardProvider) Resources(_ context.Context) []func() resource.Resour
 		newRouteResource,
 		newRouteOrderResource,
 		newKeyResource,
+		newTagDevicesResource,
+		newOrgSettingsResource,
 	}
 }
 
@@ -144,5 +146,7 @@ func (p *pushwardProvider) DataSources(_ context.Context) []func() datasource.Da
 		newOrgDataSource,
 		newMembersDataSource,
 		newDevicesDataSource,
+		newGroupsDataSource,
+		newTagsDataSource,
 	}
 }

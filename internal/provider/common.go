@@ -96,6 +96,18 @@ func clearable(s types.String) *string {
 	return &v
 }
 
+// createFailed explains a failed group or tag create. A 409 org.name_taken
+// is a group or tag made outside Terraform, which can be imported instead.
+func createFailed(diags *diag.Diagnostics, kind, name string, err error) {
+	if client.HasCode(err, client.CodeNameTaken) {
+		diags.AddError("A "+kind+" with this name already exists",
+			"The organization already has a "+kind+" named "+name+". Import it with `terraform import <address> <id>` "+
+				"(the id is in the console or the pushward_org_"+kind+"s data source), or pick another name.\n\n"+err.Error())
+		return
+	}
+	diags.AddError("Creating the "+kind+" failed", err.Error())
+}
+
 // check is a string validator from a predicate; rule completes "must ...".
 type check struct {
 	rule string

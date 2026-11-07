@@ -33,8 +33,9 @@ func (r *tagResource) Metadata(_ context.Context, req resource.MetadataRequest, 
 
 func (r *tagResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "A device tag. Routing rules and sending keys reach devices by tag; " +
-			"which devices carry it is set in the PushWard console or app, not here.",
+		MarkdownDescription: "A device tag. Routing rules and sending keys reach devices by tag. " +
+			"This resource leaves the devices that carry it alone: they are set in the PushWard console or app, " +
+			"or with `pushward_org_tag_devices`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -79,7 +80,7 @@ func (r *tagResource) Create(ctx context.Context, req resource.CreateRequest, re
 	var t client.Tag
 	body := map[string]any{"name": plan.Name.ValueString(), "description": plan.Description.ValueStringPointer()}
 	if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("tags"), body, &t); err != nil {
-		resp.Diagnostics.AddError("Creating the tag failed", err.Error())
+		createFailed(&resp.Diagnostics, "tag", plan.Name.ValueString(), err)
 		return
 	}
 	plan.set(&t)

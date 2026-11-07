@@ -93,7 +93,7 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 	var g client.Group
 	body := map[string]any{"name": plan.Name.ValueString(), "description": plan.Description.ValueStringPointer()}
 	if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("groups"), body, &g); err != nil {
-		resp.Diagnostics.AddError("Creating the group failed", err.Error())
+		createFailed(&resp.Diagnostics, "group", plan.Name.ValueString(), err)
 		return
 	}
 	plan.set(&g)

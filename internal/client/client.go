@@ -36,6 +36,10 @@ const (
 // an open invite of the organization already has.
 const CodeMemberEmailTaken = "org.member_email_taken"
 
+// CodeNameTaken is the 409 of a group or tag name the organization already
+// uses.
+const CodeNameTaken = "org.name_taken"
+
 // Client calls the API. OrgID is set once the provider has resolved the
 // key's organization.
 type Client struct {

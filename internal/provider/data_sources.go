@@ -236,3 +236,123 @@ func (d *devicesDataSource) Read(ctx context.Context, _ datasource.ReadRequest, 
 		Devices []deviceItem `tfsdk:"devices"`
 	}{items})...)
 }
+
+// --- pushward_org_groups ---
+
+type groupsDataSource struct{ c *client.Client }
+
+type groupItem struct {
+	ID          types.String `tfsdk:"id"`
+	Name        types.String `tfsdk:"name"`
+	Description types.String `tfsdk:"description"`
+	MemberIDs   types.Set    `tfsdk:"member_ids"`
+}
+
+func newGroupsDataSource() datasource.DataSource { return &groupsDataSource{} }
+
+func (d *groupsDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
+	resp.TypeName = req.ProviderTypeName + "_org_groups"
+}
+
+func (d *groupsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+	resp.Schema = schema.Schema{
+		MarkdownDescription: "Every group of the organization. Use it to reference groups made in the console by name, " +
+			"for example `{ for g in data.pushward_org_groups.all.groups : g.name => g.id }`, or to find the id that " +
+			"`terraform import` takes.",
+		Attributes: map[string]schema.Attribute{
+			"groups": schema.ListNestedAttribute{
+				Computed: true,
+				NestedObject: schema.NestedAttributeObject{Attributes: map[string]schema.Attribute{
+					"id":          computed("Group id."),
+					"name":        computed("Name, unique in the organization."),
+					"description": computed("Description; null when there is none."),
+					"member_ids": schema.SetAttribute{
+						MarkdownDescription: "User ids of the group's members.",
+						ElementType:         types.StringType,
+						Computed:            true,
+					},
+				}},
+			},
+		},
+	}
+}
+
+func (d *groupsDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
+	d.c = providerClient(req.ProviderData, &resp.Diagnostics)
+}
+
+func (d *groupsDataSource) Read(ctx context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {
+	groups, err := client.List[client.Group](ctx, d.c, d.c.OrgPath("groups"))
+	if err != nil {
+		resp.Diagnostics.AddError("Listing the groups failed", err.Error())
+		return
+	}
+	items := make([]groupItem, 0, len(groups))
+	for _, g := range groups {
+		items = append(items, groupItem{
+			ID: types.StringValue(g.ID), Name: types.StringValue(g.Name),
+			Description: types.StringPointerValue(g.Description), MemberIDs: stringSet(g.MemberIDs),
+		})
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &struct {
+		Groups []groupItem `tfsdk:"groups"`
+	}{items})...)
+}
+
+// --- pushward_org_tags ---
+
+type tagsDataSource struct{ c *client.Client }
+
+type tagItem struct {
+	ID          types.String `tfsdk:"id"`
+	Name        types.String `tfsdk:"name"`
+	Description types.String `tfsdk:"description"`
+	DeviceCount types.Int64  `tfsdk:"device_count"`
+}
+
+func newTagsDataSource() datasource.DataSource { return &tagsDataSource{} }
+
+func (d *tagsDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
+	resp.TypeName = req.ProviderTypeName + "_org_tags"
+}
+
+func (d *tagsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+	resp.Schema = schema.Schema{
+		MarkdownDescription: "Every device tag of the organization. Use it to reference tags made in the console by name, " +
+			"for example `{ for t in data.pushward_org_tags.all.tags : t.name => t.id }`, or to find the id that " +
+			"`terraform import` takes.",
+		Attributes: map[string]schema.Attribute{
+			"tags": schema.ListNestedAttribute{
+				Computed: true,
+				NestedObject: schema.NestedAttributeObject{Attributes: map[string]schema.Attribute{
+					"id":           computed("Tag id."),
+					"name":         computed("Name, unique in the organization."),
+					"description":  computed("Description; null when there is none."),
+					"device_count": schema.Int64Attribute{MarkdownDescription: "How many member devices carry the tag.", Computed: true},
+				}},
+			},
+		},
+	}
+}
+
+func (d *tagsDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
+	d.c = providerClient(req.ProviderData, &resp.Diagnostics)
+}
+
+func (d *tagsDataSource) Read(ctx context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {
+	tags, err := client.List[client.Tag](ctx, d.c, d.c.OrgPath("tags"))
+	if err != nil {
+		resp.Diagnostics.AddError("Listing the tags failed", err.Error())
+		return
+	}
+	items := make([]tagItem, 0, len(tags))
+	for _, t := range tags {
+		items = append(items, tagItem{
+			ID: types.StringValue(t.ID), Name: types.StringValue(t.Name),
+			Description: types.StringPointerValue(t.Description), DeviceCount: types.Int64Value(t.DeviceCount),
+		})
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &struct {
+		Tags []tagItem `tfsdk:"tags"`
+	}{items})...)
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mac-lucky/terraform-provider-pushward/internal/client"
 )
@@ -256,9 +258,99 @@ func (f *fakeAPI) drop(id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.groups, id)
-	delete(f.tags, id)
+	f.deleteTag(id)
 	delete(f.keys, id)
 	f.routes = slices.DeleteFunc(f.routes, func(r *client.Route) bool { return r.ID == id })
+}
+
+// deleteTag deletes a tag and takes it off every device, as the server does.
+// The caller holds f.mu.
+func (f *fakeAPI) deleteTag(id string) {
+	delete(f.tags, id)
+	for i := range f.devices {
+		f.devices[i].TagIDs = slices.DeleteFunc(f.devices[i].TagIDs, func(t string) bool { return t == id })
+	}
+}
+
+// tagOut is t as the API returns it, with the devices that carry it counted.
+// The caller holds f.mu.
+func (f *fakeAPI) tagOut(t *client.Tag) client.Tag {
+	out := *t
+	for _, d := range f.devices {
+		if slices.Contains(d.TagIDs, t.ID) {
+			out.DeviceCount++
+		}
+	}
+	return out
+}
+
+// addDevice registers a device for member uid.
+func (f *fakeAPI) addDevice(uid, deviceID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.devices = append(f.devices, client.Device{UserID: uid, DeviceID: deviceID, Delivery: true, TagIDs: []string{}, CreatedAt: time.Now().UTC()})
+}
+
+// removeDevice unregisters a device.
+func (f *fakeAPI) removeDevice(deviceID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.devices = slices.DeleteFunc(f.devices, func(d client.Device) bool { return d.DeviceID == deviceID })
+}
+
+// tagDevice puts a tag on a device behind Terraform's back.
+func (f *fakeAPI) tagDevice(tagID, deviceID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.devices {
+		if f.devices[i].DeviceID == deviceID && !slices.Contains(f.devices[i].TagIDs, tagID) {
+			f.devices[i].TagIDs = append(f.devices[i].TagIDs, tagID)
+		}
+	}
+}
+
+// tagged lists the ids of the devices that carry tagID, sorted.
+func (f *fakeAPI) tagged(tagID string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var ids []string
+	for _, d := range f.devices {
+		if slices.Contains(d.TagIDs, tagID) {
+			ids = append(ids, d.DeviceID)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// addGroup and addTag make a group or tag the way the console does.
+func (f *fakeAPI) addGroup(name string, memberIDs ...string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g := &client.Group{ID: f.id(), Name: name, MemberIDs: append([]string{}, memberIDs...), CreatedAt: time.Now().UTC()}
+	f.groups[g.ID] = g
+	return g.ID
+}
+
+func (f *fakeAPI) addTag(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := &client.Tag{ID: f.id(), Name: name, CreatedAt: time.Now().UTC()}
+	f.tags[t.ID] = t
+	return t.ID
+}
+
+// addInvite opens an email invite the way the console does; change edits it
+// before it is stored.
+func (f *fakeAPI) addInvite(email, role string, change func(*client.Invite)) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	inv := &client.Invite{ID: f.id(), Role: role, Email: &email, MaxUses: 1, CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(168 * time.Hour).UTC()}
+	if change != nil {
+		change(inv)
+	}
+	f.invites[inv.ID] = inv
+	return inv.ID
 }
 
 func (f *fakeAPI) routeOrder() []string {
@@ -292,22 +384,45 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		reply(w, 200, map[string]any{"items": f.devices})
 	})
 
-	// Members, paged by index.
-	handle("GET /orgs/{org}/members", func(w http.ResponseWriter, r *http.Request) {
+	// page answers one page of n items, paged by index; items(start, end)
+	// returns that slice.
+	page := func(w http.ResponseWriter, r *http.Request, n int, items func(start, end int) any) {
 		start := 0
 		if c := r.URL.Query().Get("cursor"); c != "" {
 			var err error
-			if start, err = strconv.Atoi(c); err != nil {
+			if start, err = strconv.Atoi(c); err != nil || start < 0 || start > n {
 				problem(w, 400, "cursor.invalid", "malformed cursor")
 				return
 			}
 		}
-		end := min(start+f.pageSize, len(f.members))
-		out := map[string]any{"items": f.members[start:end]}
-		if end < len(f.members) {
+		end := min(start+f.pageSize, n)
+		out := map[string]any{"items": items(start, end)}
+		if end < n {
 			out["next_cursor"] = strconv.Itoa(end)
 		}
 		reply(w, 200, out)
+	}
+	handle("PATCH /orgs/{org}", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		if !f.decode(w, r, &body) {
+			return
+		}
+		name := strings.TrimSpace(body.Name)
+		if n := utf8.RuneCountInString(name); n < 1 || n > 50 {
+			problem(w, 422, "org.name_invalid", "name must be 1-50 characters")
+			return
+		}
+		f.org.Name = name
+		o := f.org
+		o.MemberCount = int64(len(f.members))
+		reply(w, 200, o)
+	})
+
+	// Members.
+	handle("GET /orgs/{org}/members", func(w http.ResponseWriter, r *http.Request) {
+		page(w, r, len(f.members), func(start, end int) any { return f.members[start:end] })
 	})
 	handle("GET /orgs/{org}/members/{id}", func(w http.ResponseWriter, r *http.Request) {
 		m := f.member(r.PathValue("id"))
@@ -382,6 +497,18 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		f.invites[inv.ID] = inv
 		reply(w, 201, inv)
 	})
+	handle("GET /orgs/{org}/invites", func(w http.ResponseWriter, r *http.Request) {
+		// Newest first; ids grow with every new one.
+		ids := slices.Sorted(maps.Keys(f.invites))
+		slices.Reverse(ids)
+		page(w, r, len(ids), func(start, end int) any {
+			out := []*client.Invite{}
+			for _, id := range ids[start:end] {
+				out = append(out, f.invites[id])
+			}
+			return out
+		})
+	})
 	handle("GET /orgs/{org}/invites/{id}", func(w http.ResponseWriter, r *http.Request) {
 		inv := f.invites[r.PathValue("id")]
 		if inv == nil {
@@ -428,12 +555,16 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			return
 		}
 		if body.Name == nil || nameTaken(*body.Name, "") {
-			problem(w, 409, "org.name_taken", "that name is already used in this organization")
+			problem(w, 409, client.CodeNameTaken, "that name is already used in this organization")
 			return
 		}
 		g := &client.Group{ID: f.id(), Name: *body.Name, Description: desc(body.Description), MemberIDs: []string{}, CreatedAt: time.Now().UTC()}
 		f.groups[g.ID] = g
 		reply(w, 201, g)
+	})
+	handle("GET /orgs/{org}/groups", func(w http.ResponseWriter, r *http.Request) {
+		items := slices.SortedFunc(maps.Values(f.groups), func(a, b *client.Group) int { return strings.Compare(a.Name, b.Name) })
+		reply(w, 200, map[string]any{"items": items})
 	})
 	handle("GET /orgs/{org}/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
 		g := f.groups[r.PathValue("id")]
@@ -455,7 +586,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		if body.Name != nil {
 			if nameTaken(*body.Name, g.ID) {
-				problem(w, 409, "org.name_taken", "that name is already used in this organization")
+				problem(w, 409, client.CodeNameTaken, "that name is already used in this organization")
 				return
 			}
 			g.Name = *body.Name
@@ -495,9 +626,29 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		delete(f.groups, r.PathValue("id"))
 		w.WriteHeader(204)
 	})
+	tagNameTaken := func(name string, self string) bool {
+		for id, t := range f.tags {
+			if t.Name == name && id != self {
+				return true
+			}
+		}
+		return false
+	}
+	handle("GET /orgs/{org}/tags", func(w http.ResponseWriter, r *http.Request) {
+		items := []client.Tag{}
+		for _, t := range f.tags {
+			items = append(items, f.tagOut(t))
+		}
+		slices.SortFunc(items, func(a, b client.Tag) int { return strings.Compare(a.Name, b.Name) })
+		reply(w, 200, map[string]any{"items": items})
+	})
 	handle("POST /orgs/{org}/tags", func(w http.ResponseWriter, r *http.Request) {
 		var body named
 		if !f.decode(w, r, &body) {
+			return
+		}
+		if body.Name == nil || tagNameTaken(*body.Name, "") {
+			problem(w, 409, client.CodeNameTaken, "that name is already used in this organization")
 			return
 		}
 		t := &client.Tag{ID: f.id(), Name: *body.Name, Description: desc(body.Description), CreatedAt: time.Now().UTC()}
@@ -510,7 +661,46 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			problem(w, 404, client.CodeTagNotFound, "tag not found")
 			return
 		}
-		reply(w, 200, t)
+		reply(w, 200, f.tagOut(t))
+	})
+	handle("POST /orgs/{org}/tags/{id}/devices", func(w http.ResponseWriter, r *http.Request) {
+		t := f.tags[r.PathValue("id")]
+		if t == nil {
+			problem(w, 404, client.CodeTagNotFound, "tag not found")
+			return
+		}
+		var body struct {
+			Add    []deviceRef `json:"add"`
+			Remove []deviceRef `json:"remove"`
+		}
+		if !f.decode(w, r, &body) {
+			return
+		}
+		if len(body.Add) > tagDeviceCap || len(body.Remove) > tagDeviceCap {
+			problem(w, 422, "", "validation failed: expected array length <= 500")
+			return
+		}
+		find := func(d deviceRef) int {
+			return slices.IndexFunc(f.devices, func(dv client.Device) bool {
+				return dv.UserID == strings.ToLower(d.UserID) && dv.DeviceID == d.DeviceID
+			})
+		}
+		for _, d := range append(slices.Clone(body.Add), body.Remove...) {
+			if find(d) < 0 {
+				problem(w, 422, "org.routing_invalid", "the change names a member, device, group or tag that is not in this organization")
+				return
+			}
+		}
+		for _, d := range body.Remove {
+			dv := &f.devices[find(d)]
+			dv.TagIDs = slices.DeleteFunc(dv.TagIDs, func(id string) bool { return id == t.ID })
+		}
+		for _, d := range body.Add {
+			if dv := &f.devices[find(d)]; !slices.Contains(dv.TagIDs, t.ID) {
+				dv.TagIDs = append(dv.TagIDs, t.ID)
+			}
+		}
+		reply(w, 200, f.tagOut(t))
 	})
 	handle("PATCH /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
 		t := f.tags[r.PathValue("id")]
@@ -523,19 +713,23 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			return
 		}
 		if body.Name != nil {
+			if tagNameTaken(*body.Name, t.ID) {
+				problem(w, 409, client.CodeNameTaken, "that name is already used in this organization")
+				return
+			}
 			t.Name = *body.Name
 		}
 		if body.Description != nil {
 			t.Description = desc(body.Description)
 		}
-		reply(w, 200, t)
+		reply(w, 200, f.tagOut(t))
 	})
 	handle("DELETE /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if f.tags[r.PathValue("id")] == nil {
 			problem(w, 404, client.CodeTagNotFound, "tag not found")
 			return
 		}
-		delete(f.tags, r.PathValue("id"))
+		f.deleteTag(r.PathValue("id"))
 		w.WriteHeader(204)
 	})
 
@@ -744,6 +938,17 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			k.ExpiresAt = exp
 		}
 		reply(w, 200, k)
+	})
+	handle("POST /orgs/{org}/keys/{id}/roll", func(w http.ResponseWriter, r *http.Request) {
+		k := f.keys[r.PathValue("id")]
+		if k == nil {
+			problem(w, 404, client.CodeKeyNotFound, "integration key not found")
+			return
+		}
+		out := *k
+		secret := "hlk_" + strings.ReplaceAll(f.id(), "-", "")
+		out.Secret = &secret
+		reply(w, 200, out)
 	})
 	handle("DELETE /orgs/{org}/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if f.keys[r.PathValue("id")] == nil {

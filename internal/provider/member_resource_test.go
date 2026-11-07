@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+
+	"github.com/mac-lucky/terraform-provider-pushward/internal/client"
 )
 
 const memberName = "pushward_org_member.ann"
@@ -352,4 +355,125 @@ func TestAccMemberValidation(t *testing.T) {
 			}},
 		})
 	}
+}
+
+func TestAccMemberImportByEmail(t *testing.T) {
+	f := newFake(t)
+	// Past the first page of two.
+	f.addMember("viewer", "zed@example.com")
+	f.addMember("member", "")
+	uid := f.addMember("member", "ann@example.com")
+	cfg := memberEmailConfig(f, "ann@example.com", "member")
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy: func(*terraform.State) error {
+			if f.memberRole(uid) != "" {
+				return fmt.Errorf("member %s left after destroy", uid)
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				Config:             cfg,
+				ResourceName:       memberName,
+				ImportState:        true,
+				ImportStateId:      " Ann@Example.com",
+				ImportStatePersist: true,
+				ImportStateCheck: func(is []*terraform.InstanceState) error {
+					a := is[0].Attributes
+					if a["id"] != uid || a["user_id"] != uid || a["status"] != "joined" || a["email"] != "ann@example.com" {
+						return fmt.Errorf("imported %v", a)
+					}
+					return nil
+				},
+			},
+			{
+				Config: cfg,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(memberName, "user_id", uid),
+					func(*terraform.State) error {
+						if n := f.count("POST", "/invites"); n != 0 {
+							return fmt.Errorf("%d invites sent, want 0", n)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+func TestAccMemberImportPendingByEmail(t *testing.T) {
+	f := newFake(t)
+	// Invites list newest first, two a page. Only the open one is taken.
+	now := time.Now()
+	f.addInvite("ann@example.com", "member", func(inv *client.Invite) { inv.RevokedAt = &now })
+	open := f.addInvite("ann@example.com", "viewer", nil)
+	f.addInvite("ann@example.com", "member", func(inv *client.Invite) { inv.ExpiresAt = now.Add(-time.Hour) })
+	f.addInvite("bob@example.com", "member", nil)
+	f.addInvite("ann@example.com", "member", func(inv *client.Invite) { inv.Uses = inv.MaxUses })
+	cfg := memberEmailConfig(f, "ann@example.com", "viewer")
+	var uid string
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy: func(*terraform.State) error {
+			if f.memberRole(uid) != "" {
+				return fmt.Errorf("member %s left after destroy", uid)
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				Config:             cfg,
+				ResourceName:       memberName,
+				ImportState:        true,
+				ImportStateId:      "ann@example.com",
+				ImportStatePersist: true,
+				ImportStateCheck: func(is []*terraform.InstanceState) error {
+					a := is[0].Attributes
+					if a["id"] != open || a["invite_id"] != open || a["status"] != "pending" || a["role"] != "viewer" {
+						return fmt.Errorf("imported %v", a)
+					}
+					if v, ok := a["user_id"]; ok {
+						return fmt.Errorf("user_id = %q, want null", v)
+					}
+					return nil
+				},
+			},
+			{
+				// The pending member is the one invited: nothing is mailed again.
+				Config: cfg,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(memberName, "status", "pending"),
+					func(*terraform.State) error {
+						if n := f.count("POST", "/invites"); n != 0 {
+							return fmt.Errorf("%d invites sent, want 0", n)
+						}
+						return nil
+					},
+				),
+			},
+			{
+				PreConfig: func() { uid = f.join(open) },
+				Config:    cfg,
+				Check:     resource.TestCheckResourceAttr(memberName, "status", "joined"),
+			},
+		},
+	})
+}
+
+func TestAccMemberImportByEmailNotFound(t *testing.T) {
+	f := newFake(t)
+	now := time.Now()
+	f.addInvite("nobody@example.com", "member", func(inv *client.Invite) { inv.RevokedAt = &now })
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{{
+			Config:        memberEmailConfig(f, "nobody@example.com", "member"),
+			ResourceName:  memberName,
+			ImportState:   true,
+			ImportStateId: "nobody@example.com",
+			ExpectError:   regexp.MustCompile(`(?s)no\s+member\s+with\s+the\s+email\s+nobody@example\.com\s+and\s+no\s+open\s+invite`),
+		}},
+	})
 }

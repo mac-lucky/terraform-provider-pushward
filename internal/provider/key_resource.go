@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
@@ -34,6 +35,7 @@ type keyModel struct {
 	WidgetSlugs   types.Set       `tfsdk:"widget_slugs"`
 	ExpiresAt     types.String    `tfsdk:"expires_at"`
 	Target        *keyTarget      `tfsdk:"target"`
+	Rotation      types.Map       `tfsdk:"rotation_triggers"`
 	Secret        types.String    `tfsdk:"secret"`
 	OrgID         types.String    `tfsdk:"org_id"`
 }
@@ -59,7 +61,10 @@ var defaultKeyLevels = map[string]string{
 	"emails":        "none",
 }
 
-var _ resource.ResourceWithValidateConfig = &keyResource{}
+var (
+	_ resource.ResourceWithValidateConfig = &keyResource{}
+	_ resource.ResourceWithModifyPlan     = &keyResource{}
+)
 
 func newKeyResource() resource.Resource { return &keyResource{} }
 
@@ -107,8 +112,11 @@ func (r *keyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 		MarkdownDescription: "A sending key (`hlk_...`) owned by the organization. What it sends reaches the members the " +
 			"organization's routing rules allow, and its emails the organization's verified recipients.\n\n" +
 			"`secret` is returned once, when the key is created, and kept in the state; it is null after an import. " +
-			"`target` is fixed at creation, so changing it replaces the key. To rotate the secret, replace the key, " +
-			"for example with `lifecycle { replace_triggered_by = [...] }`.",
+			"`target` is fixed at creation, so changing it replaces the key.\n\n" +
+			"To rotate the secret in place, change `rotation_triggers`: the key keeps its id and gets a new secret, and " +
+			"the old secret stops working at once. After an import, setting `rotation_triggers` rolls the secret and puts " +
+			"the new one in the state. Replacing the key, for example with `lifecycle { replace_triggered_by = [...] }`, " +
+			"also gives a new secret, on a new key id.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -154,8 +162,14 @@ func (r *keyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 					"tag_ids":   ids("Tag ids, at most 50."),
 				},
 			},
+			"rotation_triggers": schema.MapAttribute{
+				MarkdownDescription: "Arbitrary values; a change rolls the secret in place (same key id, a new secret, the old one " +
+					"stops working at once). Creating the key and removing the map do not roll it.",
+				ElementType: types.StringType,
+				Optional:    true,
+			},
 			"secret": schema.StringAttribute{
-				MarkdownDescription: "The key's secret (`hlk_...`). Only known when Terraform created the key.",
+				MarkdownDescription: "The key's secret (`hlk_...`). Only known when Terraform created or rolled the key.",
 				Computed:            true,
 				Sensitive:           true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
@@ -187,6 +201,23 @@ func (r *keyResource) ValidateConfig(ctx context.Context, req resource.ValidateC
 	if empty("group_ids") && empty("tag_ids") {
 		resp.Diagnostics.AddAttributeError(path.Root("target"), "Empty target",
 			"target must name at least one group or tag. Leave target out to let the key reach the whole organization.")
+	}
+}
+
+// rolls reports whether an update rolls the secret: rotation_triggers is set
+// and changed. Removing it does not roll.
+func rolls(plan, state types.Map) bool { return !plan.IsNull() && !plan.Equal(state) }
+
+// ModifyPlan shows the secret as unknown when the update rolls it.
+func (r *keyResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+	var plan, state types.Map
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("rotation_triggers"), &plan)...)
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("rotation_triggers"), &state)...)
+	if !resp.Diagnostics.HasError() && rolls(plan, state) {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("secret"), types.StringUnknown())...)
 	}
 }
 
@@ -313,6 +344,8 @@ func (r *keyResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	}
 	plan.OrgID = state.OrgID
 	body := plan.body(ctx, &resp.Diagnostics)
+	// Nothing but rotation_triggers changed when the body is the state's.
+	patch := !reflect.DeepEqual(body, state.body(ctx, &resp.Diagnostics)) || !plan.ExpiresAt.Equal(state.ExpiresAt)
 	// Sent only when it changed: an expiry already in the past is refused.
 	if !plan.ExpiresAt.Equal(state.ExpiresAt) {
 		body["expires_at"] = expiry(plan.ExpiresAt, &resp.Diagnostics)
@@ -320,12 +353,29 @@ func (r *keyResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	id := state.ID.ValueString()
 	var k client.Key
-	if err := r.c.Do(ctx, http.MethodPatch, r.c.OrgPath("keys", state.ID.ValueString()), body, &k); err != nil {
-		resp.Diagnostics.AddError("Updating the key failed", err.Error())
-		return
+	if patch {
+		if err := r.c.Do(ctx, http.MethodPatch, r.c.OrgPath("keys", id), body, &k); err != nil {
+			resp.Diagnostics.AddError("Updating the key failed", err.Error())
+			return
+		}
+		plan.set(&k)
 	}
-	plan.set(&k)
+	// Last, so that nothing can fail between the roll and saving its secret.
+	// A failed roll keeps the old triggers in the state, so the next apply
+	// rolls again.
+	if rolls(plan.Rotation, state.Rotation) {
+		if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("keys", id, "roll"), nil, &k); err != nil {
+			resp.Diagnostics.AddError("Rolling the key's secret failed", err.Error())
+			return
+		}
+		plan.set(&k)
+	}
+	// Planned unknown for a trigger only known at apply that ended up unchanged.
+	if plan.Secret.IsUnknown() {
+		plan.Secret = state.Secret
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 

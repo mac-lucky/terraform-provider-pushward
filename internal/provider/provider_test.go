@@ -134,3 +134,45 @@ data "pushward_org_devices" "all" {}
 		}},
 	})
 }
+
+// Groups and tags made in the console, looked up by name.
+func TestDataSourcesGroupsTags(t *testing.T) {
+	f := newFake(t)
+	ann := f.addMember("member", "ann@example.com")
+	ops := f.addGroup("ops", ann)
+	f.addGroup("design")
+	pager := f.addTag("pager")
+	f.addTag("lab")
+	f.addDevice(ann, "ann-phone")
+	f.tagDevice(pager, "ann-phone")
+	const groups, tags = "data.pushward_org_groups.all", "data.pushward_org_tags.all"
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		Steps: []resource.TestStep{{
+			Config: f.config(`
+data "pushward_org_groups" "all" {}
+data "pushward_org_tags" "all" {}
+
+output "ops" {
+  value = { for g in data.pushward_org_groups.all.groups : g.name => g.id }["ops"]
+}
+output "pager" {
+  value = { for t in data.pushward_org_tags.all.tags : t.name => t.id }["pager"]
+}
+`),
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(groups, "groups.#", "2"),
+				resource.TestCheckResourceAttr(groups, "groups.0.name", "design"),
+				resource.TestCheckResourceAttr(groups, "groups.0.member_ids.#", "0"),
+				resource.TestCheckNoResourceAttr(groups, "groups.0.description"),
+				resource.TestCheckResourceAttr(groups, "groups.1.member_ids.0", ann),
+				resource.TestCheckResourceAttr(tags, "tags.#", "2"),
+				resource.TestCheckResourceAttr(tags, "tags.0.name", "lab"),
+				resource.TestCheckResourceAttr(tags, "tags.0.device_count", "0"),
+				resource.TestCheckResourceAttr(tags, "tags.1.device_count", "1"),
+				resource.TestCheckOutput("ops", ops),
+				resource.TestCheckOutput("pager", pager),
+			),
+		}},
+	})
+}
