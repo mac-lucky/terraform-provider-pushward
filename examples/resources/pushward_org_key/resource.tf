@@ -15,14 +15,11 @@ resource "pushward_org_key" "ci" {
     group_ids = [pushward_org_group.oncall.id]
   }
 
-  # Bump the input to rotate the secret: the key is replaced.
-  lifecycle {
-    replace_triggered_by = [terraform_data.ci_key_rotation]
+  # Change the value to roll the secret in place: same key id, a new
+  # secret, and the old one stops working at once.
+  rotation_triggers = {
+    rotated = "2026-11"
   }
-}
-
-resource "terraform_data" "ci_key_rotation" {
-  input = "2026-11"
 }
 
 output "ci_key" {

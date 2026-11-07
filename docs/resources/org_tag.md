@@ -3,12 +3,12 @@
 page_title: "pushward_org_tag Resource - pushward"
 subcategory: ""
 description: |-
-  A device tag. Routing rules and sending keys reach devices by tag; which devices carry it is set in the PushWard console or app, not here.
+  A device tag. Routing rules and sending keys reach devices by tag. This resource leaves the devices that carry it alone: they are set in the PushWard console or app, or with pushward_org_tag_devices.
 ---
 
 # pushward_org_tag (Resource)
 
-A device tag. Routing rules and sending keys reach devices by tag; which devices carry it is set in the PushWard console or app, not here.
+A device tag. Routing rules and sending keys reach devices by tag. This resource leaves the devices that carry it alone: they are set in the PushWard console or app, or with `pushward_org_tag_devices`.
 
 ## Example Usage
 

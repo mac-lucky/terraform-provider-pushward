@@ -4,14 +4,17 @@ page_title: "pushward_org_key Resource - pushward"
 subcategory: ""
 description: |-
   A sending key (hlk_...) owned by the organization. What it sends reaches the members the organization's routing rules allow, and its emails the organization's verified recipients.
-  secret is returned once, when the key is created, and kept in the state; it is null after an import. target is fixed at creation, so changing it replaces the key. To rotate the secret, replace the key, for example with lifecycle { replace_triggered_by = [...] }.
+  secret is returned once, when the key is created, and kept in the state; it is null after an import. target is fixed at creation, so changing it replaces the key.
+  To rotate the secret in place, change rotation_triggers: the key keeps its id and gets a new secret, and the old secret stops working at once. After an import, setting rotation_triggers rolls the secret and puts the new one in the state. Replacing the key, for example with lifecycle { replace_triggered_by = [...] }, also gives a new secret, on a new key id.
 ---
 
 # pushward_org_key (Resource)
 
 A sending key (`hlk_...`) owned by the organization. What it sends reaches the members the organization's routing rules allow, and its emails the organization's verified recipients.
 
-`secret` is returned once, when the key is created, and kept in the state; it is null after an import. `target` is fixed at creation, so changing it replaces the key. To rotate the secret, replace the key, for example with `lifecycle { replace_triggered_by = [...] }`.
+`secret` is returned once, when the key is created, and kept in the state; it is null after an import. `target` is fixed at creation, so changing it replaces the key.
+
+To rotate the secret in place, change `rotation_triggers`: the key keeps its id and gets a new secret, and the old secret stops working at once. After an import, setting `rotation_triggers` rolls the secret and puts the new one in the state. Replacing the key, for example with `lifecycle { replace_triggered_by = [...] }`, also gives a new secret, on a new key id.
 
 ## Example Usage
 
@@ -33,14 +36,11 @@ resource "pushward_org_key" "ci" {
     group_ids = [pushward_org_group.oncall.id]
   }
 
-  # Bump the input to rotate the secret: the key is replaced.
-  lifecycle {
-    replace_triggered_by = [terraform_data.ci_key_rotation]
+  # Change the value to roll the secret in place: same key id, a new
+  # secret, and the old one stops working at once.
+  rotation_triggers = {
+    rotated = "2026-11"
   }
-}
-
-resource "terraform_data" "ci_key_rotation" {
-  input = "2026-11"
 }
 
 output "ci_key" {
@@ -61,6 +61,7 @@ output "ci_key" {
 - `activity_slugs` (Set of String) Restrict the key to these activity slugs or patterns (trailing `*`). Empty means unrestricted.
 - `expires_at` (String) When the key stops working, an RFC 3339 time in the future. Unset means never. An import reads it as PushWard returns it, so when the configuration spells the same time another way (another UTC offset), the first apply after an import rewrites it in place and changes nothing else.
 - `permissions` (Attributes) What the key may do. Organization keys have no device, sharing or account access. (see [below for nested schema](#nestedatt--permissions))
+- `rotation_triggers` (Map of String) Arbitrary values; a change rolls the secret in place (same key id, a new secret, the old one stops working at once). Creating the key and removing the map do not roll it.
 - `target` (Attributes) Limit the key to these groups and tags: what it sends must target inside them, and it sees only activities and widgets targeted inside them. Unset reaches the whole organization. It must name at least one group or tag. Changing it replaces the key. (see [below for nested schema](#nestedatt--target))
 - `widget_slugs` (Set of String) Restrict the key to these widget slugs or patterns (trailing `*`). Empty means unrestricted.
 
@@ -68,7 +69,7 @@ output "ci_key" {
 
 - `id` (String) The ID of this resource.
 - `org_id` (String) The organization the resource belongs to, that of the provider's org admin key when the resource was created or imported. An org admin key of another organization is an error, not a plan that creates the resource again there.
-- `secret` (String, Sensitive) The key's secret (`hlk_...`). Only known when Terraform created the key.
+- `secret` (String, Sensitive) The key's secret (`hlk_...`). Only known when Terraform created or rolled the key.
 
 <a id="nestedatt--permissions"></a>
 ### Nested Schema for `permissions`

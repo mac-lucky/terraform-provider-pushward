@@ -1,9 +1,10 @@
 # terraform-provider-pushward
 
-Terraform provider for [PushWard](https://pushward.app) organizations. It keeps the people
-and the routing of an organization in code: members (invited by email), groups, device tags,
-routing rules and their order, and the organization's sending keys. Data sources read the
-organization, its members and their devices.
+Terraform provider for [PushWard](https://pushward.app) organizations. It keeps an
+organization in code: its name, members (invited by email), groups, device tags and the
+devices that carry them, routing rules and their order, and the organization's sending keys.
+Data sources read the organization, its members and their devices, and its groups and tags,
+so ones made in the console can be referenced by name.
 
 ## Keys
 
@@ -74,7 +75,8 @@ More in [`docs/`](docs/) and [`examples/`](examples/).
 
 ## What stays in the console
 
-An admin key cannot do everything an owner can, on purpose. These stay in the console:
+An admin key cannot do everything an owner can, on purpose. The organization's name is
+`pushward_org_settings`; these stay in the console:
 
 - billing changes: plan, seats, payment method
 - owners, admins and billing members (the provider invites and manages `member` and
