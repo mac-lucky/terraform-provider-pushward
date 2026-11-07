@@ -172,7 +172,9 @@ func (f *fakeAPI) replay(w http.ResponseWriter, r *http.Request, find func(id st
 
 // created records the create's Idempotency-Key and answers 201 with v. On a
 // pattern that loseResponse named it drops the connection instead, once: the
-// row is made and the client never hears of it.
+// row is made and the client never hears of it. The cut comes inside the
+// status line, because net/http replays a keyed request by itself when no
+// byte came back, and only the client's own retry must recover here.
 func (f *fakeAPI) created(w http.ResponseWriter, r *http.Request, id string, v any) {
 	if k := idemKey(r); k != "" {
 		f.idem[k] = id
@@ -180,6 +182,7 @@ func (f *fakeAPI) created(w http.ResponseWriter, r *http.Request, id string, v a
 	if f.lose[r.Pattern] {
 		delete(f.lose, r.Pattern)
 		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			_, _ = conn.Write([]byte("HTTP/1.1 20"))
 			conn.Close()
 		}
 		return
