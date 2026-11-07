@@ -354,8 +354,8 @@ func (r *keyResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		return
 	}
 	id := state.ID.ValueString()
-	var k client.Key
 	if patch {
+		var k client.Key
 		if err := r.c.Do(ctx, http.MethodPatch, r.c.OrgPath("keys", id), body, &k); err != nil {
 			resp.Diagnostics.AddError("Updating the key failed", err.Error())
 			return
@@ -366,11 +366,14 @@ func (r *keyResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	// A failed roll keeps the old triggers in the state, so the next apply
 	// rolls again.
 	if rolls(plan.Rotation, state.Rotation) {
-		if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("keys", id, "roll"), nil, &k); err != nil {
+		var rolled client.Key
+		if err := r.c.Do(ctx, http.MethodPost, r.c.OrgPath("keys", id, "roll"), nil, &rolled); err != nil {
 			resp.Diagnostics.AddError("Rolling the key's secret failed", err.Error())
 			return
 		}
-		plan.set(&k)
+		// Only the secret: a change made in the console since the plan must
+		// not replace the planned values, which the next refresh compares.
+		plan.Secret = types.StringPointerValue(rolled.Secret)
 	}
 	// Planned unknown for a trigger only known at apply that ended up unchanged.
 	if plan.Secret.IsUnknown() {

@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
@@ -606,6 +607,9 @@ func TestAccKeyRoll(t *testing.T) {
 			{
 				// A rename with the same triggers PATCHes and keeps the secret.
 				Config: f.config("resource \"pushward_org_key\" \"ci\" {\n  name = \"ci-deploy\"\n  rotation_triggers = { rotated = \"2026-12\" }\n}\n"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectKnownValue(n, tfjsonpath.New("secret"), knownvalue.NotNull())},
+				},
 				Check: resource.ComposeAggregateTestCheckFunc(
 					attrIs(n, "secret", &secret),
 					resource.TestCheckResourceAttr(n, "name", "ci-deploy"),
@@ -613,10 +617,13 @@ func TestAccKeyRoll(t *testing.T) {
 				),
 			},
 			{
-				// Removing the triggers does not roll.
+				// Removing the triggers does not roll, and the plan says so.
 				Config: f.config("resource \"pushward_org_key\" \"ci\" {\n  name = \"ci-deploy\"\n}\n"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(n, plancheck.ResourceActionUpdate)},
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(n, plancheck.ResourceActionUpdate),
+						plancheck.ExpectKnownValue(n, tfjsonpath.New("secret"), knownvalue.NotNull()),
+					},
 				},
 				Check: resource.ComposeAggregateTestCheckFunc(
 					attrIs(n, "id", &id),
@@ -627,6 +634,66 @@ func TestAccKeyRoll(t *testing.T) {
 			},
 		},
 	})
+}
+
+// betweenPlanAndApply runs fn as a pre-apply plan check: after the plan, before
+// the apply.
+type betweenPlanAndApply func()
+
+func (fn betweenPlanAndApply) CheckPlan(context.Context, plancheck.CheckPlanRequest, *plancheck.CheckPlanResponse) {
+	fn()
+}
+
+// The key is renamed in the console after a plan that only rolls it: the
+// apply rolls and stores the planned name, and the next apply puts it back.
+func TestAccKeyRollKeepsPlannedValues(t *testing.T) {
+	f := newFake(t)
+	const n = "pushward_org_key.ci"
+	cfg := func(rotated string) string {
+		return f.config("resource \"pushward_org_key\" \"ci\" {\n  name = \"ci\"\n  rotation_triggers = { rotated = \"" + rotated + "\" }\n}\n")
+	}
+	var id, secret string
+	serverName := func(want string) resource.TestCheckFunc {
+		return func(*terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if got := f.keys[id].Name; got != want {
+				return fmt.Errorf("key name on the server = %q, want %q", got, want)
+			}
+			return nil
+		}
+	}
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.empty,
+		Steps: []resource.TestStep{
+			{
+				Config: cfg("2026-11"),
+				Check:  resource.ComposeAggregateTestCheckFunc(saveAttr(n, "id", &id), saveAttr(n, "secret", &secret)),
+			},
+			{
+				Config: cfg("2026-12"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{betweenPlanAndApply(func() {
+						f.mu.Lock()
+						defer f.mu.Unlock()
+						f.keys[id].Name = "ci-old"
+					})},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(n, "name", "ci"),
+					attrNot(n, "secret", &secret),
+					serverName("ci-old"),
+				),
+				// The rename back to ci.
+				ExpectNonEmptyPlan: true,
+			},
+			{Config: cfg("2026-12"), Check: serverName("ci")},
+		},
+	})
+	if got := f.count("POST", "/roll"); got != 1 {
+		t.Errorf("%d rolls, want 1", got)
+	}
 }
 
 // An imported key has no secret; setting rotation_triggers rolls one into the
