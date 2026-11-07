@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -129,7 +130,7 @@ func TestRetries(t *testing.T) {
 		{"PATCH retries 503", http.MethodPatch, []int{503}, 2, true},
 		{"DELETE retries 503", http.MethodDelete, []int{503}, 2, true},
 		{"POST retries 429", http.MethodPost, []int{429}, 2, true},
-		{"POST does not retry 503", http.MethodPost, []int{503}, 1, false},
+		{"POST retries 503", http.MethodPost, []int{503}, 2, true},
 		{"GET does not retry 500", http.MethodGet, []int{500}, 1, false},
 		{"GET does not retry 409", http.MethodGet, []int{409}, 1, false},
 		{"cap reached", http.MethodGet, []int{503, 503, 503, 503, 503, 503}, 5, false},
@@ -152,27 +153,50 @@ func TestRetries(t *testing.T) {
 	}
 }
 
-func TestPOSTNotRetriedOnNetworkError(t *testing.T) {
-	var calls atomic.Int32
+// A POST is retried after a lost connection and a 503 with the key of its
+// first attempt; the next call gets a new key, and other methods none.
+func TestPOSTRetriedWithOneIdempotencyKey(t *testing.T) {
+	var mu sync.Mutex
+	var keys []string
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		conn, _, err := w.(http.Hijacker).Hijack()
-		if err == nil {
-			conn.Close()
+		mu.Lock()
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		n := len(keys)
+		mu.Unlock()
+		switch n {
+		case 1:
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+		case 2:
+			writeProblem(w, 503, `{"status":503,"code":"service.unavailable"}`)
+		default:
+			w.WriteHeader(http.StatusCreated)
 		}
 	})
-	if err := c.Do(context.Background(), http.MethodPost, c.OrgPath("tags"), map[string]string{"name": "a"}, nil); err == nil {
-		t.Fatal("no error")
+	if err := c.Do(context.Background(), http.MethodPost, c.OrgPath("tags"), map[string]string{"name": "a"}, nil); err != nil {
+		t.Fatal(err)
 	}
-	if calls.Load() != 1 {
-		t.Errorf("POST sent %d times", calls.Load())
+	if err := c.Do(context.Background(), http.MethodPost, c.OrgPath("tags"), map[string]string{"name": "b"}, nil); err != nil {
+		t.Fatal(err)
 	}
-	calls.Store(0)
-	if err := c.Do(context.Background(), http.MethodGet, c.OrgPath("tags"), nil, nil); err == nil {
-		t.Fatal("no error")
+	if err := c.Do(context.Background(), http.MethodGet, c.OrgPath("tags"), nil, nil); err != nil {
+		t.Fatal(err)
 	}
-	if calls.Load() != int32(c.MaxAttempts) {
-		t.Errorf("GET sent %d times, want %d", calls.Load(), c.MaxAttempts)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(keys) != 5 {
+		t.Fatalf("sent %d requests, want 5: %q", len(keys), keys)
+	}
+	valid := regexp.MustCompile(`^[!-~]{1,128}$`)
+	if !valid.MatchString(keys[0]) || keys[1] != keys[0] || keys[2] != keys[0] {
+		t.Errorf("the attempts of one POST sent the keys %q, want one valid key", keys[:3])
+	}
+	if !valid.MatchString(keys[3]) || keys[3] == keys[0] {
+		t.Errorf("the second POST sent %q after %q, want a new key", keys[3], keys[0])
+	}
+	if keys[4] != "" {
+		t.Errorf("GET sent Idempotency-Key %q", keys[4])
 	}
 }
 
@@ -189,13 +213,16 @@ func TestUntrustedCertificateNotRetried(t *testing.T) {
 	t.Cleanup(srv.Close)
 	c := New(srv.URL, "hlo_test", "test") // trusts the system roots, not the test certificate
 	c.BaseWait = time.Millisecond
-	err := c.Do(context.Background(), http.MethodGet, "/orgs", nil, nil)
-	var certErr *tls.CertificateVerificationError
-	if !errors.As(err, &certErr) {
-		t.Fatalf("err = %v, want a certificate error", err)
-	}
-	if n := conns.Load(); n != 1 {
-		t.Errorf("connected %d times, want 1", n)
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		conns.Store(0)
+		err := c.Do(context.Background(), method, "/orgs", nil, nil)
+		var certErr *tls.CertificateVerificationError
+		if !errors.As(err, &certErr) {
+			t.Fatalf("%s: err = %v, want a certificate error", method, err)
+		}
+		if n := conns.Load(); n != 1 {
+			t.Errorf("%s: connected %d times, want 1", method, n)
+		}
 	}
 }
 
@@ -238,7 +265,7 @@ func TestRetryAfterOneMinuteWaited(t *testing.T) {
 	c := New(DefaultURL, "hlo_test", "test")
 	for _, body := range []string{`{"status":429,"code":"rate_limit.exceeded","retry_after_ms":60000}`, `{"status":429}`} {
 		resp := &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": {"60"}}}
-		wait, ok := c.retryWait(context.Background(), http.MethodPost, parseProblem(resp, []byte(body)), 1)
+		wait, ok := c.retryWait(context.Background(), parseProblem(resp, []byte(body)), 1)
 		if !ok || wait != time.Minute {
 			t.Errorf("%s: wait = %v, %v; want 1m0s, true", body, wait, ok)
 		}

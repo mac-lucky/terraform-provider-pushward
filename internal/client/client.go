@@ -5,6 +5,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -119,9 +120,12 @@ func (c *Client) OrgPath(segments ...string) string {
 }
 
 // Do sends in as JSON and decodes the response into out (either may be nil).
-// 429 is retried for every method. 503 and network errors are retried for
-// everything but POST: every POST this provider sends creates something, and
-// neither proves that nothing was created.
+// 429, 503 and network errors are retried for every method. A POST carries a
+// random Idempotency-Key, the same on every attempt of one call, which makes
+// each POST this provider sends safe to repeat: the server answers a repeated
+// create of a route, group, tag, invite or key with the row the first attempt
+// made; a repeated key roll returns another fresh secret, and the last one is
+// the one that works; adding and removing tag devices is idempotent anyway.
 func (c *Client) Do(ctx context.Context, method, path string, in, out any) error {
 	var body []byte
 	if in != nil {
@@ -130,12 +134,16 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 			return err
 		}
 	}
+	var idempotencyKey string
+	if method == http.MethodPost {
+		idempotencyKey = rand.Text()
+	}
 	for attempt := 1; ; attempt++ {
-		err := c.send(ctx, method, path, body, out)
+		err := c.send(ctx, method, path, body, idempotencyKey, out)
 		if err == nil {
 			return nil
 		}
-		wait, ok := c.retryWait(ctx, method, err, attempt)
+		wait, ok := c.retryWait(ctx, err, attempt)
 		if !ok {
 			return err
 		}
@@ -149,7 +157,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	}
 }
 
-func (c *Client) retryWait(ctx context.Context, method string, err error, attempt int) (time.Duration, bool) {
+func (c *Client) retryWait(ctx context.Context, err error, attempt int) (time.Duration, bool) {
 	if attempt >= c.MaxAttempts || ctx.Err() != nil {
 		return 0, false
 	}
@@ -158,8 +166,7 @@ func (c *Client) retryWait(ctx context.Context, method string, err error, attemp
 	var netErr *url.Error
 	switch {
 	case errors.As(err, &apiErr):
-		if apiErr.Status != http.StatusTooManyRequests &&
-			(apiErr.Status != http.StatusServiceUnavailable || method == http.MethodPost) {
+		if apiErr.Status != http.StatusTooManyRequests && apiErr.Status != http.StatusServiceUnavailable {
 			return 0, false
 		}
 		if apiErr.RetryAfter > 0 {
@@ -168,7 +175,7 @@ func (c *Client) retryWait(ctx context.Context, method string, err error, attemp
 	case errors.As(err, &netErr):
 		// A certificate the client refuses is refused again on every try.
 		var certErr *tls.CertificateVerificationError
-		if method == http.MethodPost || errors.As(err, &certErr) {
+		if errors.As(err, &certErr) {
 			return 0, false
 		}
 	default:
@@ -183,7 +190,7 @@ func (c *Client) retryWait(ctx context.Context, method string, err error, attemp
 	return wait, true
 }
 
-func (c *Client) send(ctx context.Context, method, path string, body []byte, out any) error {
+func (c *Client) send(ctx context.Context, method, path string, body []byte, idempotencyKey string, out any) error {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
@@ -197,6 +204,9 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, out
 	req.Header.Set("User-Agent", c.UserAgent)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
