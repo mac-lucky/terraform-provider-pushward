@@ -47,6 +47,11 @@ type fakeAPI struct {
 	// phone maps a device id to the first row of its phone, for rows that
 	// share a push token (a phone that registered again).
 	phone map[string]string
+	// idem maps a caller's Idempotency-Key to the id of the row its first
+	// create made. lose holds the create patterns whose next response is
+	// lost.
+	idem map[string]string
+	lose map[string]bool
 }
 
 func newFake(t *testing.T) *fakeAPI {
@@ -59,6 +64,8 @@ func newFake(t *testing.T) *fakeAPI {
 		tags:     map[string]*client.Tag{},
 		keys:     map[string]*client.Key{},
 		phone:    map[string]string{},
+		idem:     map[string]string{},
+		lose:     map[string]bool{},
 		pageSize: 2,
 	}
 	owner := "Owner"
@@ -139,6 +146,53 @@ func (f *fakeAPI) decode(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	return true
+}
+
+// idemKey is the create's Idempotency-Key under its caller, or "" without one.
+func idemKey(r *http.Request) string {
+	if k := r.Header.Get("Idempotency-Key"); k != "" {
+		return r.Header.Get("Authorization") + " " + k
+	}
+	return ""
+}
+
+// replay answers a create that repeats a caller's Idempotency-Key with the
+// row the first attempt made, while find still has it, as the server does.
+func (f *fakeAPI) replay(w http.ResponseWriter, r *http.Request, find func(id string) (any, bool)) bool {
+	id, ok := f.idem[idemKey(r)]
+	if !ok {
+		return false
+	}
+	v, ok := find(id)
+	if ok {
+		reply(w, 201, v)
+	}
+	return ok
+}
+
+// created records the create's Idempotency-Key and answers 201 with v. On a
+// pattern that loseResponse named it drops the connection instead, once: the
+// row is made and the client never hears of it.
+func (f *fakeAPI) created(w http.ResponseWriter, r *http.Request, id string, v any) {
+	if k := idemKey(r); k != "" {
+		f.idem[k] = id
+	}
+	if f.lose[r.Pattern] {
+		delete(f.lose, r.Pattern)
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close()
+		}
+		return
+	}
+	reply(w, 201, v)
+}
+
+// loseResponse makes the next create on pattern, such as
+// "POST /orgs/{org}/routes", lose its response.
+func (f *fakeAPI) loseResponse(pattern string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lose[pattern] = true
 }
 
 // count reports how many requests matched method and a path suffix.
@@ -502,6 +556,13 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			problem(w, 422, "email.invalid", "email must be a valid email address")
 			return
 		}
+		// Revoking the invite, or its expiry, gives its key up.
+		if f.replay(w, r, func(id string) (any, bool) {
+			inv := f.invites[id]
+			return inv, inv != nil && inv.RevokedAt == nil && time.Now().Before(inv.ExpiresAt)
+		}) {
+			return
+		}
 		email := strings.ToLower(strings.TrimSpace(*body.Email))
 		if f.emailTaken(email) {
 			problem(w, 409, client.CodeMemberEmailTaken, "a member or open invite of this organization already has this email")
@@ -509,7 +570,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		inv := &client.Invite{ID: f.id(), Role: body.Role, Email: &email, MaxUses: 1, CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(168 * time.Hour).UTC()}
 		f.invites[inv.ID] = inv
-		reply(w, 201, inv)
+		f.created(w, r, inv.ID, inv)
 	})
 	handle("GET /orgs/{org}/invites", func(w http.ResponseWriter, r *http.Request) {
 		// Newest first; ids grow with every new one.
@@ -568,13 +629,16 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		if !f.decode(w, r, &body) {
 			return
 		}
+		if f.replay(w, r, func(id string) (any, bool) { g, ok := f.groups[id]; return g, ok }) {
+			return
+		}
 		if body.Name == nil || nameTaken(*body.Name, "") {
 			problem(w, 409, client.CodeNameTaken, "that name is already used in this organization")
 			return
 		}
 		g := &client.Group{ID: f.id(), Name: *body.Name, Description: desc(body.Description), MemberIDs: []string{}, CreatedAt: time.Now().UTC()}
 		f.groups[g.ID] = g
-		reply(w, 201, g)
+		f.created(w, r, g.ID, g)
 	})
 	handle("GET /orgs/{org}/groups", func(w http.ResponseWriter, r *http.Request) {
 		items := slices.SortedFunc(maps.Values(f.groups), func(a, b *client.Group) int { return strings.Compare(a.Name, b.Name) })
@@ -661,13 +725,22 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		if !f.decode(w, r, &body) {
 			return
 		}
+		if f.replay(w, r, func(id string) (any, bool) {
+			t := f.tags[id]
+			if t == nil {
+				return nil, false
+			}
+			return f.tagOut(t), true
+		}) {
+			return
+		}
 		if body.Name == nil || tagNameTaken(*body.Name, "") {
 			problem(w, 409, client.CodeNameTaken, "that name is already used in this organization")
 			return
 		}
 		t := &client.Tag{ID: f.id(), Name: *body.Name, Description: desc(body.Description), CreatedAt: time.Now().UTC()}
 		f.tags[t.ID] = t
-		reply(w, 201, t)
+		f.created(w, r, t.ID, t)
 	})
 	handle("GET /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
 		t := f.tags[r.PathValue("id")]
@@ -783,6 +856,9 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		if !f.decode(w, r, &rt) {
 			return
 		}
+		if f.replay(w, r, func(id string) (any, bool) { first := route(id); return first, first != nil }) {
+			return
+		}
 		now := time.Now().UTC()
 		rt.ID, rt.CreatedAt, rt.UpdatedAt = f.id(), now, now
 		rt.AllowGroupIDs = lowerIDs(rt.AllowGroupIDs)
@@ -790,7 +866,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		rt.Note = desc(rt.Note)
 		f.routes = append(f.routes, &rt)
 		list()
-		reply(w, 201, &rt)
+		f.created(w, r, rt.ID, &rt)
 	})
 	handle("PUT /orgs/{org}/routes/order", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -894,6 +970,10 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			utc := k.ExpiresAt.UTC()
 			k.ExpiresAt = &utc
 		}
+		// What the replay returns is the stored key, which has no secret.
+		if f.replay(w, r, func(id string) (any, bool) { first, ok := f.keys[id]; return first, ok }) {
+			return
+		}
 		k.ID, k.CreatedAt = f.id(), time.Now().UTC()
 		if len(k.ActivitySlugs) == 0 {
 			k.ActivitySlugs = nil
@@ -905,7 +985,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		secret := "hlk_" + strings.ReplaceAll(k.ID, "-", "")
 		k.Secret = &secret
 		f.keys[k.ID] = &stored
-		reply(w, 201, k)
+		f.created(w, r, k.ID, k)
 	})
 	handle("GET /orgs/{org}/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
 		k := f.keys[r.PathValue("id")]
