@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -18,8 +19,11 @@ import (
 // fakeAPI is an in-memory org API with the server's problem shapes. It
 // takes any hlo_ bearer token as a manage key of its one organization.
 type fakeAPI struct {
-	t   *testing.T
-	srv *httptest.Server
+	t    *testing.T
+	srv  *httptest.Server
+	spec *apiSpec
+	// patterns is every route the fake serves, for TestFakeRoutesInSpec.
+	patterns []string
 
 	mu        sync.Mutex
 	n         int
@@ -42,6 +46,7 @@ type fakeAPI struct {
 func newFake(t *testing.T) *fakeAPI {
 	f := &fakeAPI{
 		t:        t,
+		spec:     testSpec(t),
 		org:      client.Org{ID: "0a000000-0000-4000-8000-000000000001", Name: "Acme", Slug: "acme", Role: "admin", Plan: "team", Status: "active", MemberLimit: 50, CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
 		invites:  map[string]*client.Invite{},
 		groups:   map[string]*client.Group{},
@@ -101,9 +106,29 @@ func (f *fakeAPI) auth(next http.Handler) http.Handler {
 	})
 }
 
-func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+// decode reads the request body into v. A key the operation's request
+// schema does not have fails the test: the server allows no other keys, so
+// production would answer 422.
+func (f *fakeAPI) decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	data, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = json.Unmarshal(data, v)
+	}
+	if err != nil {
 		problem(w, 400, "", err.Error())
+		return false
+	}
+	op := f.spec.op(r.Pattern)
+	if op == nil || op.request() == nil {
+		f.t.Errorf("%s: the spec has no request body for it", r.Pattern)
+		problem(w, 400, "", "no request body expected")
+		return false
+	}
+	var raw any
+	_ = json.Unmarshal(data, &raw)
+	if unknown := f.spec.unknownKeys(op.request(), raw, "body"); len(unknown) > 0 {
+		f.t.Errorf("%s sent %v, which %s does not take", r.Pattern, unknown, op.OperationID)
+		problem(w, 422, "", "validation failed: unexpected property "+strings.Join(unknown, ", "))
 		return false
 	}
 	return true
@@ -247,24 +272,28 @@ func (f *fakeAPI) routeOrder() []string {
 }
 
 func (f *fakeAPI) routesFor(mux *http.ServeMux) {
-	mux.HandleFunc("GET /orgs", func(w http.ResponseWriter, r *http.Request) {
+	handle := func(pattern string, h http.HandlerFunc) {
+		f.patterns = append(f.patterns, pattern)
+		mux.HandleFunc(pattern, h)
+	}
+	handle("GET /orgs", func(w http.ResponseWriter, r *http.Request) {
 		items := []client.Org{f.org}
 		for range f.extraOrgs {
 			items = append(items, f.org)
 		}
 		reply(w, 200, map[string]any{"items": items})
 	})
-	mux.HandleFunc("GET /orgs/{org}", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}", func(w http.ResponseWriter, r *http.Request) {
 		o := f.org
 		o.MemberCount = int64(len(f.members))
 		reply(w, 200, o)
 	})
-	mux.HandleFunc("GET /orgs/{org}/devices", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/devices", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]any{"items": f.devices})
 	})
 
 	// Members, paged by index.
-	mux.HandleFunc("GET /orgs/{org}/members", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/members", func(w http.ResponseWriter, r *http.Request) {
 		start := 0
 		if c := r.URL.Query().Get("cursor"); c != "" {
 			var err error
@@ -280,7 +309,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, out)
 	})
-	mux.HandleFunc("GET /orgs/{org}/members/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/members/{id}", func(w http.ResponseWriter, r *http.Request) {
 		m := f.member(r.PathValue("id"))
 		if m == nil {
 			problem(w, 404, client.CodeMemberNotFound, "member not found")
@@ -288,14 +317,14 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, m)
 	})
-	mux.HandleFunc("PATCH /orgs/{org}/members/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("PATCH /orgs/{org}/members/{id}", func(w http.ResponseWriter, r *http.Request) {
 		m := f.member(r.PathValue("id"))
 		if m == nil {
 			problem(w, 404, client.CodeMemberNotFound, "member not found")
 			return
 		}
 		var body map[string]json.RawMessage
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		if raw, ok := body["role"]; ok {
@@ -318,7 +347,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, m)
 	})
-	mux.HandleFunc("DELETE /orgs/{org}/members/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("DELETE /orgs/{org}/members/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if f.member(r.PathValue("id")) == nil {
 			problem(w, 404, client.CodeMemberNotFound, "member not found")
 			return
@@ -328,12 +357,12 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 	})
 
 	// Invites.
-	mux.HandleFunc("POST /orgs/{org}/invites", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /orgs/{org}/invites", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Role  string  `json:"role"`
 			Email *string `json:"email"`
 		}
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		if body.Role != "member" && body.Role != "viewer" {
@@ -353,7 +382,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		f.invites[inv.ID] = inv
 		reply(w, 201, inv)
 	})
-	mux.HandleFunc("GET /orgs/{org}/invites/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/invites/{id}", func(w http.ResponseWriter, r *http.Request) {
 		inv := f.invites[r.PathValue("id")]
 		if inv == nil {
 			problem(w, 404, client.CodeInviteNotFound, "invite not found")
@@ -361,7 +390,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, inv)
 	})
-	mux.HandleFunc("DELETE /orgs/{org}/invites/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("DELETE /orgs/{org}/invites/{id}", func(w http.ResponseWriter, r *http.Request) {
 		inv := f.invites[r.PathValue("id")]
 		if inv == nil {
 			problem(w, 404, client.CodeInviteNotFound, "invite not found")
@@ -393,9 +422,9 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		v := strings.TrimSpace(*d)
 		return &v
 	}
-	mux.HandleFunc("POST /orgs/{org}/groups", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /orgs/{org}/groups", func(w http.ResponseWriter, r *http.Request) {
 		var body named
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		if body.Name == nil || nameTaken(*body.Name, "") {
@@ -406,7 +435,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		f.groups[g.ID] = g
 		reply(w, 201, g)
 	})
-	mux.HandleFunc("GET /orgs/{org}/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
 		g := f.groups[r.PathValue("id")]
 		if g == nil {
 			problem(w, 404, client.CodeGroupNotFound, "group not found")
@@ -414,14 +443,14 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, g)
 	})
-	mux.HandleFunc("PATCH /orgs/{org}/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("PATCH /orgs/{org}/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
 		g := f.groups[r.PathValue("id")]
 		if g == nil {
 			problem(w, 404, client.CodeGroupNotFound, "group not found")
 			return
 		}
 		var body named
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		if body.Name != nil {
@@ -436,7 +465,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, g)
 	})
-	mux.HandleFunc("PUT /orgs/{org}/groups/{id}/members", func(w http.ResponseWriter, r *http.Request) {
+	handle("PUT /orgs/{org}/groups/{id}/members", func(w http.ResponseWriter, r *http.Request) {
 		g := f.groups[r.PathValue("id")]
 		if g == nil {
 			problem(w, 404, client.CodeGroupNotFound, "group not found")
@@ -445,7 +474,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		var body struct {
 			UserIDs []string `json:"user_ids"`
 		}
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		body.UserIDs = lowerIDs(body.UserIDs)
@@ -458,7 +487,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		g.MemberIDs = body.UserIDs
 		reply(w, 200, g)
 	})
-	mux.HandleFunc("DELETE /orgs/{org}/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("DELETE /orgs/{org}/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if f.groups[r.PathValue("id")] == nil {
 			problem(w, 404, client.CodeGroupNotFound, "group not found")
 			return
@@ -466,16 +495,16 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		delete(f.groups, r.PathValue("id"))
 		w.WriteHeader(204)
 	})
-	mux.HandleFunc("POST /orgs/{org}/tags", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /orgs/{org}/tags", func(w http.ResponseWriter, r *http.Request) {
 		var body named
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		t := &client.Tag{ID: f.id(), Name: *body.Name, Description: desc(body.Description), CreatedAt: time.Now().UTC()}
 		f.tags[t.ID] = t
 		reply(w, 201, t)
 	})
-	mux.HandleFunc("GET /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
 		t := f.tags[r.PathValue("id")]
 		if t == nil {
 			problem(w, 404, client.CodeTagNotFound, "tag not found")
@@ -483,14 +512,14 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, t)
 	})
-	mux.HandleFunc("PATCH /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("PATCH /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
 		t := f.tags[r.PathValue("id")]
 		if t == nil {
 			problem(w, 404, client.CodeTagNotFound, "tag not found")
 			return
 		}
 		var body named
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		if body.Name != nil {
@@ -501,7 +530,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, t)
 	})
-	mux.HandleFunc("DELETE /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("DELETE /orgs/{org}/tags/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if f.tags[r.PathValue("id")] == nil {
 			problem(w, 404, client.CodeTagNotFound, "tag not found")
 			return
@@ -525,12 +554,12 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		return map[string]any{"items": f.routes}
 	}
-	mux.HandleFunc("GET /orgs/{org}/routes", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/routes", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, list())
 	})
-	mux.HandleFunc("POST /orgs/{org}/routes", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /orgs/{org}/routes", func(w http.ResponseWriter, r *http.Request) {
 		var rt client.Route
-		if !decode(w, r, &rt) {
+		if !f.decode(w, r, &rt) {
 			return
 		}
 		now := time.Now().UTC()
@@ -542,11 +571,11 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		list()
 		reply(w, 201, &rt)
 	})
-	mux.HandleFunc("PUT /orgs/{org}/routes/order", func(w http.ResponseWriter, r *http.Request) {
+	handle("PUT /orgs/{org}/routes/order", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			RouteIDs []string `json:"route_ids"`
 		}
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		if len(body.RouteIDs) != len(f.routes) {
@@ -565,7 +594,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		f.routes = ordered
 		reply(w, 200, list())
 	})
-	mux.HandleFunc("GET /orgs/{org}/routes/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/routes/{id}", func(w http.ResponseWriter, r *http.Request) {
 		rt := route(r.PathValue("id"))
 		if rt == nil {
 			problem(w, 404, client.CodeRouteNotFound, "rule not found")
@@ -573,7 +602,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, rt)
 	})
-	mux.HandleFunc("PATCH /orgs/{org}/routes/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("PATCH /orgs/{org}/routes/{id}", func(w http.ResponseWriter, r *http.Request) {
 		rt := route(r.PathValue("id"))
 		if rt == nil {
 			problem(w, 404, client.CodeRouteNotFound, "rule not found")
@@ -586,7 +615,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			AllowTagIDs   *[]string `json:"allow_tag_ids"`
 			Note          *string   `json:"note"`
 		}
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		if body.SlugPattern != nil {
@@ -607,7 +636,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		rt.UpdatedAt = time.Now().UTC()
 		reply(w, 200, rt)
 	})
-	mux.HandleFunc("DELETE /orgs/{org}/routes/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("DELETE /orgs/{org}/routes/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if route(r.PathValue("id")) == nil {
 			problem(w, 404, client.CodeRouteNotFound, "rule not found")
 			return
@@ -617,9 +646,9 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 	})
 
 	// Keys.
-	mux.HandleFunc("POST /orgs/{org}/keys", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /orgs/{org}/keys", func(w http.ResponseWriter, r *http.Request) {
 		var k client.Key
-		if !decode(w, r, &k) {
+		if !f.decode(w, r, &k) {
 			return
 		}
 		if k.Permissions == (client.KeyPermissions{}) {
@@ -657,7 +686,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		f.keys[k.ID] = &stored
 		reply(w, 201, k)
 	})
-	mux.HandleFunc("GET /orgs/{org}/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /orgs/{org}/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
 		k := f.keys[r.PathValue("id")]
 		if k == nil {
 			problem(w, 404, client.CodeKeyNotFound, "integration key not found")
@@ -665,14 +694,14 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, k)
 	})
-	mux.HandleFunc("PATCH /orgs/{org}/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("PATCH /orgs/{org}/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
 		k := f.keys[r.PathValue("id")]
 		if k == nil {
 			problem(w, 404, client.CodeKeyNotFound, "integration key not found")
 			return
 		}
 		var body map[string]json.RawMessage
-		if !decode(w, r, &body) {
+		if !f.decode(w, r, &body) {
 			return
 		}
 		if _, ok := body["target"]; ok {
@@ -716,7 +745,7 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 		}
 		reply(w, 200, k)
 	})
-	mux.HandleFunc("DELETE /orgs/{org}/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handle("DELETE /orgs/{org}/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if f.keys[r.PathValue("id")] == nil {
 			problem(w, 404, client.CodeKeyNotFound, "integration key not found")
 			return
