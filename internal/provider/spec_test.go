@@ -38,6 +38,10 @@ type specContent map[string]struct {
 type specOp struct {
 	OperationID string `yaml:"operationId"`
 	Description string `yaml:"description"`
+	Parameters  []struct {
+		Name string `yaml:"name"`
+		In   string `yaml:"in"`
+	} `yaml:"parameters"`
 	RequestBody *struct {
 		Content specContent `yaml:"content"`
 	} `yaml:"requestBody"`
@@ -140,6 +144,16 @@ func (op *specOp) response() *specSchema {
 	return nil
 }
 
+// header reports whether op takes the request header name.
+func (op *specOp) header(name string) bool {
+	for _, p := range op.Parameters {
+		if p.In == "header" && strings.EqualFold(p.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // unknownKeys lists the keys in v, at any depth, that sc does not have and
 // does not allow (additionalProperties: false).
 func (s *apiSpec) unknownKeys(sc *specSchema, v any, at string) []string {
@@ -183,6 +197,27 @@ func TestFakeRoutesInSpec(t *testing.T) {
 		if !strings.Contains(op.Description, "Takes an org admin key (hlo_)") {
 			t.Errorf("%s (%s) does not say it takes an org admin key: %q", p, op.OperationID, op.Description)
 		}
+	}
+}
+
+// The client retries every POST. For a create that is safe only while the
+// server dedupes it by Idempotency-Key; a key roll and a tag devices change
+// are safe to repeat without one.
+func TestFakeCreatesTakeIdempotencyKey(t *testing.T) {
+	spec := testSpec(t)
+	safe := []string{"POST /orgs/{org}/keys/{id}/roll", "POST /orgs/{org}/tags/{id}/devices"}
+	n := 0
+	for _, p := range newFake(t).patterns {
+		if !strings.HasPrefix(p, "POST ") || slices.Contains(safe, p) {
+			continue
+		}
+		n++
+		if op := spec.op(p); op == nil || !op.header("Idempotency-Key") {
+			t.Errorf("%s takes no Idempotency-Key header in the spec, so a retried create can make a second one", p)
+		}
+	}
+	if n == 0 {
+		t.Fatal("the fake serves no creates")
 	}
 }
 
@@ -273,5 +308,8 @@ func TestSpecChecksCatchDrift(t *testing.T) {
 	}]()
 	if got := spec.checkTags(typo, []*specSchema{spec.byID("getOrgKey").response()}, "x"); len(got) != 2 {
 		t.Errorf("checkTags = %q, want nickname and target.group_idz", got)
+	}
+	if !spec.byID("createOrgKey").header("Idempotency-Key") || spec.byID("rollOrgKey").header("Idempotency-Key") {
+		t.Error("header does not tell createOrgKey, which takes Idempotency-Key, from rollOrgKey, which does not")
 	}
 }

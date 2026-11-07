@@ -566,7 +566,7 @@ components:
             description: One answer button (2-4 per card).
             properties:
               authentication_required:
-                description: "Require device unlock before firing. Default false. The device enforces it, not the server: app builds that predate this field stay one-tap. Changing it starts a new round like any other option change."
+                description: "Require device unlock before firing. Default false. The device enforces it, not the server: on Android, builds that predate this field fire the option with one tap; a locked iPhone asks for Face ID or the passcode before any button, with or without it. Changing it starts a new round like any other option change."
                 type: boolean
               body:
                 description: HTTP request body for silent webhook. <=1KB. Ignored for custom-scheme URLs.
@@ -14111,6 +14111,14 @@ paths:
           required: true
           schema:
             type: string
+        - description: "Identifies this create across retries, so a repeated request does not make a second one. Use a new random value for each create: a request repeating a value gets the group or tag the first attempt made, whatever its body. A value applies per caller (each org admin key, or the signed-in user) for as long as that group or tag exists. Printable ASCII without spaces."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Identifies this create across retries, so a repeated request does not make a second one. Use a new random value for each create: a request repeating a value gets the group or tag the first attempt made, whatever its body. A value applies per caller (each org admin key, or the signed-in user) for as long as that group or tag exists. Printable ASCII without spaces."
+            maxLength: 128
+            pattern: ^[!-~]+$
+            type: string
       requestBody:
         content:
           application/json:
@@ -15120,6 +15128,14 @@ paths:
           required: true
           schema:
             type: string
+        - description: "Identifies this create across retries, so a repeated request does not make or mail a second invite. Use a new random value for each create: a request repeating a value gets the invite the first attempt made, whatever its body, without its code and with no mail sent. A value applies per caller (each org admin key, or the signed-in user) until that invite is revoked or expires. Printable ASCII without spaces."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Identifies this create across retries, so a repeated request does not make or mail a second invite. Use a new random value for each create: a request repeating a value gets the invite the first attempt made, whatever its body, without its code and with no mail sent. A value applies per caller (each org admin key, or the signed-in user) until that invite is revoked or expires. Printable ASCII without spaces."
+            maxLength: 128
+            pattern: ^[!-~]+$
+            type: string
       requestBody:
         content:
           application/json:
@@ -15758,6 +15774,14 @@ paths:
           name: org_id
           required: true
           schema:
+            type: string
+        - description: "Identifies this create across retries, so a repeated request does not make a second key. Use a new random value for each create: a request repeating a value gets the key the first attempt made, whatever its body, without key: the secret is shown only once. A value applies per caller (each org admin key, or the signed-in user) until that key is revoked. Printable ASCII without spaces."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Identifies this create across retries, so a repeated request does not make a second key. Use a new random value for each create: a request repeating a value gets the key the first attempt made, whatever its body, without key: the secret is shown only once. A value applies per caller (each org admin key, or the signed-in user) until that key is revoked. Printable ASCII without spaces."
+            maxLength: 128
+            pattern: ^[!-~]+$
             type: string
       requestBody:
         content:
@@ -17528,6 +17552,14 @@ paths:
           required: true
           schema:
             type: string
+        - description: "Identifies this create across retries, so a repeated request does not add the rule twice. Use a new random value for each create: a request repeating a value gets the rule the first attempt added, whatever its body. A value applies per caller (each org admin key, or the signed-in user) for as long as the rule exists. Printable ASCII without spaces."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Identifies this create across retries, so a repeated request does not add the rule twice. Use a new random value for each create: a request repeating a value gets the rule the first attempt added, whatever its body. A value applies per caller (each org admin key, or the signed-in user) for as long as the rule exists. Printable ASCII without spaces."
+            maxLength: 128
+            pattern: ^[!-~]+$
+            type: string
       requestBody:
         content:
           application/json:
@@ -18599,6 +18631,14 @@ paths:
           name: org_id
           required: true
           schema:
+            type: string
+        - description: "Identifies this create across retries, so a repeated request does not make a second one. Use a new random value for each create: a request repeating a value gets the group or tag the first attempt made, whatever its body. A value applies per caller (each org admin key, or the signed-in user) for as long as that group or tag exists. Printable ASCII without spaces."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Identifies this create across retries, so a repeated request does not make a second one. Use a new random value for each create: a request repeating a value gets the group or tag the first attempt made, whatever its body. A value applies per caller (each org admin key, or the signed-in user) for as long as that group or tag exists. Printable ASCII without spaces."
+            maxLength: 128
+            pattern: ^[!-~]+$
             type: string
       requestBody:
         content:
