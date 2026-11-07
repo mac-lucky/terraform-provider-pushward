@@ -41,6 +41,10 @@ const CodeMemberEmailTaken = "org.member_email_taken"
 // uses.
 const CodeNameTaken = "org.name_taken"
 
+// codeEmailNotEnabled is the 503 of an invite email on a server that sends
+// no mail.
+const codeEmailNotEnabled = "email.not_enabled"
+
 // Client calls the API. OrgID is set once the provider has resolved the
 // key's organization.
 type Client struct {
@@ -166,7 +170,8 @@ func (c *Client) retryWait(ctx context.Context, err error, attempt int) (time.Du
 	var netErr *url.Error
 	switch {
 	case errors.As(err, &apiErr):
-		if apiErr.Status != http.StatusTooManyRequests && apiErr.Status != http.StatusServiceUnavailable {
+		// A server with mail turned off answers email.not_enabled on every try.
+		if (apiErr.Status != http.StatusTooManyRequests && apiErr.Status != http.StatusServiceUnavailable) || apiErr.Code == codeEmailNotEnabled {
 			return 0, false
 		}
 		if apiErr.RetryAfter > 0 {

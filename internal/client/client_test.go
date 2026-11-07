@@ -342,3 +342,20 @@ func TestListStopsOnRepeatedCursor(t *testing.T) {
 		t.Fatal("a cursor that never moves looped or passed")
 	}
 }
+
+// A server with mail turned off answers an invite with 503 email.not_enabled
+// before it stores anything, and answers the same on every try.
+func TestEmailNotEnabledNotRetried(t *testing.T) {
+	var calls atomic.Int32
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		writeProblem(w, 503, `{"status":503,"code":"email.not_enabled"}`)
+	})
+	err := c.Do(context.Background(), http.MethodPost, c.OrgPath("invites"), map[string]string{"email": "ann@example.com"}, nil)
+	if !HasCode(err, "email.not_enabled") {
+		t.Fatalf("err = %v", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("sent %d times, want 1", n)
+	}
+}
