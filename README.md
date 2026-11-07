@@ -86,7 +86,9 @@ An admin key cannot do everything an owner can, on purpose. The organization's n
 
 ## Retries
 
-A request that gets a 429 or 503, or loses its connection, is tried up to five times. Creates
+A request that gets a 503 or loses its connection is tried up to five times. One that gets a
+429 waits as long as PushWard says, plus a random extra so parallel requests do not all come
+back at once, and keeps trying for up to five minutes in all. Creates
 send an `Idempotency-Key`, so when the connection drops after PushWard made the rule, group,
 tag, invite or key, the retry gets that one back instead of making a second (and mails no
 second invite). A key comes back from such a retry without its secret, which PushWard shows

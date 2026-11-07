@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -55,7 +56,12 @@ type Client struct {
 	HTTP      *http.Client
 
 	// MaxAttempts is how many times a request is sent, the first included.
+	// A 429 is retried past it, within RateLimitBudget.
 	MaxAttempts int
+	// RateLimitBudget is how long one request may wait on 429s in all. Count
+	// alone is not enough: Terraform sends 10 requests at once, and when the
+	// key's limit lets one through at a time, a request can lose many rounds.
+	RateLimitBudget time.Duration
 	// MaxWait caps a single wait between attempts. A server hint longer than
 	// that fails the request instead of blocking the run. It covers the flat
 	// 60 s hint of the API's minute rate limits.
@@ -68,13 +74,14 @@ type Client struct {
 // New returns a client for baseURL with the default retry policy.
 func New(baseURL, key, version string) *Client {
 	return &Client{
-		BaseURL:     strings.TrimRight(baseURL, "/"),
-		Key:         key,
-		UserAgent:   "terraform-provider-pushward/" + version,
-		HTTP:        &http.Client{Timeout: 30 * time.Second},
-		MaxAttempts: 5,
-		MaxWait:     time.Minute,
-		BaseWait:    time.Second,
+		BaseURL:         strings.TrimRight(baseURL, "/"),
+		Key:             key,
+		UserAgent:       "terraform-provider-pushward/" + version,
+		HTTP:            &http.Client{Timeout: 30 * time.Second},
+		MaxAttempts:     5,
+		RateLimitBudget: 5 * time.Minute,
+		MaxWait:         time.Minute,
+		BaseWait:        time.Second,
 	}
 }
 
@@ -142,14 +149,18 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if method == http.MethodPost {
 		idempotencyKey = rand.Text()
 	}
+	var limited time.Duration // waited on 429s so far
 	for attempt := 1; ; attempt++ {
 		err := c.send(ctx, method, path, body, idempotencyKey, out)
 		if err == nil {
 			return nil
 		}
-		wait, ok := c.retryWait(ctx, err, attempt)
+		wait, ok := c.retryWait(ctx, err, attempt, limited)
 		if !ok {
 			return err
+		}
+		if rateLimited(err) {
+			limited += wait
 		}
 		t := time.NewTimer(wait)
 		select {
@@ -161,8 +172,15 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	}
 }
 
-func (c *Client) retryWait(ctx context.Context, err error, attempt int) (time.Duration, bool) {
-	if attempt >= c.MaxAttempts || ctx.Err() != nil {
+func rateLimited(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == http.StatusTooManyRequests
+}
+
+// retryWait is how long to wait before the next attempt, and false when there
+// is none. limited is what the request has waited on 429s so far.
+func (c *Client) retryWait(ctx context.Context, err error, attempt int, limited time.Duration) (time.Duration, bool) {
+	if ctx.Err() != nil || (attempt >= c.MaxAttempts && !rateLimited(err)) {
 		return 0, false
 	}
 	wait := c.BaseWait << (attempt - 1)
@@ -188,6 +206,14 @@ func (c *Client) retryWait(ctx context.Context, err error, attempt int) (time.Du
 	}
 	if wait > c.MaxWait {
 		return 0, false
+	}
+	if rateLimited(err) {
+		// The hint is when the key's next request gets through, the same for
+		// every request waiting on it; a random extra spreads them out.
+		wait = min(wait+mrand.N(wait+1), c.MaxWait)
+		if limited+wait > c.RateLimitBudget {
+			return 0, false
+		}
 	}
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < wait {
 		return 0, false

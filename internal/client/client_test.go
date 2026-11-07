@@ -265,10 +265,66 @@ func TestRetryAfterOneMinuteWaited(t *testing.T) {
 	c := New(DefaultURL, "hlo_test", "test")
 	for _, body := range []string{`{"status":429,"code":"rate_limit.exceeded","retry_after_ms":60000}`, `{"status":429}`} {
 		resp := &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": {"60"}}}
-		wait, ok := c.retryWait(context.Background(), parseProblem(resp, []byte(body)), 1)
+		wait, ok := c.retryWait(context.Background(), parseProblem(resp, []byte(body)), 1, 0)
 		if !ok || wait != time.Minute {
 			t.Errorf("%s: wait = %v, %v; want 1m0s, true", body, wait, ok)
 		}
+	}
+}
+
+// Ten requests at once against a key that lets one through every 20 ms, with
+// the exact wait in retry_after_ms as the API's limiter gives it: every one
+// gets through, though most lose more rounds than MaxAttempts.
+func TestRateLimitedRequestsAllGetThrough(t *testing.T) {
+	const interval = 20 * time.Millisecond
+	var mu sync.Mutex
+	var next time.Time
+	var refused atomic.Int32
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		now := time.Now()
+		if now.Before(next) {
+			wait := max(next.Sub(now).Milliseconds(), 1)
+			mu.Unlock()
+			refused.Add(1)
+			writeProblem(w, 429, fmt.Sprintf(`{"status":429,"code":"rate_limit.exceeded","retry_after_ms":%d}`, wait))
+			return
+		}
+		next = now.Add(interval)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var wg sync.WaitGroup
+	errs := make(chan error, 10)
+	for range 10 {
+		wg.Go(func() { errs <- c.Do(context.Background(), http.MethodGet, "/orgs", nil, nil) })
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	if refused.Load() < int32(c.MaxAttempts) {
+		t.Errorf("only %d refusals: the limiter did not make requests wait", refused.Load())
+	}
+}
+
+// A 429 that never clears fails once the request has waited RateLimitBudget.
+func TestRateLimitBudget(t *testing.T) {
+	var calls atomic.Int32
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		writeProblem(w, 429, `{"status":429,"code":"rate_limit.exceeded","retry_after_ms":10}`)
+	})
+	c.RateLimitBudget = 200 * time.Millisecond
+	start := time.Now()
+	if err := c.Do(context.Background(), http.MethodGet, "/orgs", nil, nil); !HasCode(err, "rate_limit.exceeded") {
+		t.Fatalf("err = %v", err)
+	}
+	if d := time.Since(start); d > 2*time.Second || calls.Load() <= int32(c.MaxAttempts) {
+		t.Errorf("%d calls in %v: want more than MaxAttempts, stopping near the budget", calls.Load(), d)
 	}
 }
 
