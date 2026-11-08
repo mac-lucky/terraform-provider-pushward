@@ -201,11 +201,15 @@ func TestFakeRoutesInSpec(t *testing.T) {
 }
 
 // The client retries every POST. For a create that is safe only while the
-// server dedupes it by Idempotency-Key; a key roll and a tag devices change
-// are safe to repeat without one.
+// server dedupes it by Idempotency-Key; a key roll, a tag devices change and
+// a domain verify are safe to repeat without one. A repeated domain create
+// gets 409 org.domain_exists, and pushward_org_domain adopts the domain.
 func TestFakeCreatesTakeIdempotencyKey(t *testing.T) {
 	spec := testSpec(t)
-	safe := []string{"POST /orgs/{org}/keys/{id}/roll", "POST /orgs/{org}/tags/{id}/devices"}
+	safe := []string{
+		"POST /orgs/{org}/keys/{id}/roll", "POST /orgs/{org}/tags/{id}/devices",
+		"POST /orgs/{org}/domains", "POST /orgs/{org}/domains/{id}/verify",
+	}
 	n := 0
 	for _, p := range newFake(t).patterns {
 		if !strings.HasPrefix(p, "POST ") || slices.Contains(safe, p) {
@@ -236,6 +240,10 @@ func TestClientTypesMatchSpec(t *testing.T) {
 	if devices == nil || devices.Items == nil {
 		t.Fatal("listOrgDevices has no items")
 	}
+	domains := spec.resolve(response("listOrgDomains")).Properties["domains"]
+	if domains == nil || domains.Items == nil {
+		t.Fatal("listOrgDomains has no domains")
+	}
 	for _, tc := range []struct {
 		v       any
 		schemas []*specSchema
@@ -249,6 +257,8 @@ func TestClientTypesMatchSpec(t *testing.T) {
 		// The secret, key, is only in the responses that create or roll one.
 		{client.Key{}, []*specSchema{response("getOrgKey"), response("createOrgKey")}},
 		{client.Device{}, []*specSchema{devices.Items}},
+		{client.Domain{}, []*specSchema{domains.Items, response("createOrgDomain"), response("verifyOrgDomain")}},
+		{client.SSOConnection{}, []*specSchema{response("getOrgSSOConnection"), response("putOrgSSOConnection")}},
 	} {
 		typ := reflect.TypeOf(tc.v)
 		for _, msg := range spec.checkTags(typ, tc.schemas, typ.Name()) {

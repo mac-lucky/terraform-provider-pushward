@@ -3,8 +3,9 @@
 Terraform provider for [PushWard](https://pushward.app) organizations. It keeps an
 organization in code: its name, members (invited by email), groups, device tags and the
 devices that carry them, routing rules and their order, and the organization's sending keys.
-Data sources read the organization, its members and their devices, and its groups and tags,
-so ones made in the console can be referenced by name.
+On the Enterprise plan it also verifies the organization's email domains and manages its
+single sign-on connection. Data sources read the organization, its members and their devices,
+and its groups and tags, so ones made in the console can be referenced by name.
 
 ## Keys
 
@@ -73,6 +74,32 @@ at first. The first apply after they join adds them; nothing else has to change.
 
 More in [`docs/`](docs/) and [`examples/`](examples/).
 
+## Domains and single sign-on
+
+Enterprise organizations can sign members in through their own identity provider, OpenID
+Connect or SAML 2.0, for the email domains they verified. `pushward_org_domain` adds a
+domain and gives you the TXT record that proves it. Publish that with your DNS provider and
+`pushward_org_domain_verification` waits until PushWard sees it, 10 minutes by default.
+
+Only an owner can set up the connection or point it at another identity provider, and an
+org admin key acts as an admin at most. So an owner sets it up in the console, and you
+import it:
+
+```sh
+terraform import pushward_org_sso_connection.this <org id>
+```
+
+From then on Terraform turns it on and off, sets `require_sso` and can roll the OIDC client
+secret. PushWard never returns the secret, so one changed in the console does not show up in
+a plan. Use `client_secret_wo` with Terraform 1.11 or newer to keep it out of the state. A
+SAML connection needs no metadata in the configuration: `saml = {}` keeps the identity
+provider as the owner saved it, even while its metadata URL is down.
+
+PushWard checks the TXT record every day. After seven misses in a row the domain goes back to
+`pending`, which `pushward_org_domain` shows in `status`; the verification stays in the state,
+so nothing that depends on it waits. Fix the record and `terraform apply -replace` the
+verification to verify the domain again.
+
 ## What stays in the console
 
 An admin key cannot do everything an owner can, on purpose. The organization's name is
@@ -82,6 +109,7 @@ An admin key cannot do everything an owner can, on purpose. The organization's n
 - owners, admins and billing members (the provider invites and manages `member` and
   `viewer` only)
 - org admin keys themselves
+- setting up single sign-on, or changing its identity provider
 - deleting the organization
 
 ## Retries
@@ -92,7 +120,9 @@ back at once, and keeps trying for up to five minutes in all. Creates
 send an `Idempotency-Key`, so when the connection drops after PushWard made the rule, group,
 tag, invite or key, the retry gets that one back instead of making a second (and mails no
 second invite). A key comes back from such a retry without its secret, which PushWard shows
-only once, so the provider rolls it once and keeps the new secret.
+only once, so the provider rolls it once and keeps the new secret. PushWard does not dedupe a
+domain create, so that one goes without a key: the retry gets a conflict for the domain the
+first attempt added, and the provider takes that one.
 
 ## Building and testing
 

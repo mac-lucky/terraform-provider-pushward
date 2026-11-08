@@ -94,6 +94,53 @@ type Key struct {
 	Secret        *string        `json:"key,omitempty"`
 }
 
+// Domain is an email domain the organization claims; status is pending or
+// verified.
+type Domain struct {
+	ID         string     `json:"id"`
+	Domain     string     `json:"domain"`
+	Status     string     `json:"status"`
+	TXTName    string     `json:"txt_name"`
+	TXTValue   string     `json:"txt_value"`
+	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// SSOConnection is the organization's single sign-on. Configured is false
+// while there is none. The OIDC client secret is never returned.
+type SSOConnection struct {
+	Configured  bool     `json:"configured"`
+	Protocol    string   `json:"protocol,omitempty"`
+	Enabled     bool     `json:"enabled"`
+	RequireSSO  bool     `json:"require_sso"`
+	RedirectURI string   `json:"redirect_uri"`
+	OIDC        *SSOOIDC `json:"oidc,omitempty"`
+	SAML        *SSOSAML `json:"saml,omitempty"`
+}
+
+type SSOOIDC struct {
+	Issuer          string `json:"issuer"`
+	ClientID        string `json:"client_id"`
+	ClientSecretSet bool   `json:"client_secret_set"`
+}
+
+// SSOSAML holds the service provider values, always, and the identity
+// provider's for a SAML connection.
+type SSOSAML struct {
+	SPEntityID      string           `json:"sp_entity_id"`
+	ACSURL          string           `json:"acs_url"`
+	SPMetadataURL   string           `json:"sp_metadata_url"`
+	IdPEntityID     string           `json:"idp_entity_id,omitempty"`
+	IdPMetadataURL  string           `json:"idp_metadata_url,omitempty"`
+	IdPCertificates []SSOCertificate `json:"idp_certificates,omitempty"`
+}
+
+type SSOCertificate struct {
+	SHA256Fingerprint string    `json:"sha256_fingerprint"`
+	Subject           string    `json:"subject"`
+	NotAfter          time.Time `json:"not_after"`
+}
+
 type Device struct {
 	UserID                  string    `json:"user_id"`
 	Nickname                *string   `json:"nickname"`

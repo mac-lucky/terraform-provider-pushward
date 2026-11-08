@@ -52,7 +52,51 @@ type fakeAPI struct {
 	// lost.
 	idem map[string]string
 	lose map[string]bool
+
+	domains []*client.Domain
+	// verifyMisses is how many verifies of a domain, by name, find no TXT
+	// record before one does. taken holds the domains another organization
+	// verified. addFirst holds the domains the console adds just before the
+	// next create of that name.
+	verifyMisses map[string]int
+	taken        map[string]bool
+	addFirst     map[string]bool
+	sso          *fakeSSO
+	// ssoSecrets and ssoMetadata count the PUTs that sent a client secret or
+	// SAML metadata.
+	ssoSecrets, ssoMetadata int
+	// idpMetadata maps a SAML metadata document, or the URL serving one, to
+	// the identity provider it names. A URL missing from it does not answer.
+	idpMetadata map[string]samlIdP
 }
+
+// fakeSSO is a connection an owner set up in the console. The fake's key
+// acts as an admin, as every org admin key does, so it may only save the
+// same identity provider again. metadataURL is where a SAML provider's
+// metadata was read from, "" for an uploaded document.
+type fakeSSO struct {
+	protocol, issuer, clientID, secret string
+	enabled, requireSSO                bool
+	idp                                samlIdP
+	metadataURL                        string
+}
+
+// samlIdP is what SAML metadata names: the provider is the entity ID, the SSO
+// URL and the signing certificates, by fingerprint.
+type samlIdP struct {
+	entityID, ssoURL string
+	fingerprints     []string
+}
+
+// The SAML metadata an owner set the fake's connection up from, the same
+// provider's metadata as a document, and another provider's.
+const (
+	idpMetadataURL   = "https://idp.example.com/saml/metadata"
+	idpMetadataXML   = `<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.com/saml"/>`
+	otherMetadataURL = "https://idp.example.com/other"
+)
+
+var consoleIdP = samlIdP{entityID: "https://idp.example.com/saml", ssoURL: "https://idp.example.com/saml/sso", fingerprints: []string{"0A:1B", "2C:3D"}}
 
 func newFake(t *testing.T) *fakeAPI {
 	f := &fakeAPI{
@@ -67,6 +111,15 @@ func newFake(t *testing.T) *fakeAPI {
 		idem:     map[string]string{},
 		lose:     map[string]bool{},
 		pageSize: 2,
+
+		verifyMisses: map[string]int{},
+		taken:        map[string]bool{},
+		addFirst:     map[string]bool{},
+		idpMetadata: map[string]samlIdP{
+			idpMetadataURL:   consoleIdP,
+			idpMetadataXML:   consoleIdP,
+			otherMetadataURL: {entityID: "https://other.example.com/saml", ssoURL: "https://other.example.com/sso", fingerprints: []string{"4E:5F"}},
+		},
 	}
 	owner := "Owner"
 	f.members = []*client.Member{{UserID: "0b000000-0000-4000-8000-000000000001", Nickname: &owner, Role: "owner", JoinedAt: f.org.CreatedAt}}
@@ -315,10 +368,11 @@ func (f *fakeAPI) inviteRevoked(id string) bool {
 	return f.invites[id] != nil && f.invites[id].RevokedAt != nil
 }
 
-// drop deletes a group, tag, route or key behind Terraform's back.
+// drop deletes a group, tag, route, key or domain behind Terraform's back.
 func (f *fakeAPI) drop(id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.domains = slices.DeleteFunc(f.domains, func(d *client.Domain) bool { return d.ID == id })
 	delete(f.groups, id)
 	f.deleteTag(id)
 	delete(f.keys, id)
@@ -422,6 +476,117 @@ func (f *fakeAPI) addInvite(email, role string, change func(*client.Invite)) str
 	}
 	f.invites[inv.ID] = inv
 	return inv.ID
+}
+
+// addDomain adds a domain the way the console does, verified or pending.
+func (f *fakeAPI) addDomain(name string, verified bool) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d := f.newDomain(name)
+	if verified {
+		now := time.Now().UTC()
+		d.Status, d.VerifiedAt = "verified", &now
+	}
+	return d.ID
+}
+
+// newDomain stores a pending domain. The caller holds f.mu.
+func (f *fakeAPI) newDomain(name string) *client.Domain {
+	id := f.id()
+	d := &client.Domain{
+		ID: id, Domain: name, Status: "pending", CreatedAt: time.Now().UTC(),
+		TXTName: "_pushward-verification." + name, TXTValue: "pushward-verification=" + strings.ReplaceAll(id, "-", ""),
+	}
+	f.domains = append(f.domains, d)
+	return d
+}
+
+func (f *fakeAPI) domain(id string) *client.Domain {
+	for _, d := range f.domains {
+		if d.ID == id {
+			return d
+		}
+	}
+	return nil
+}
+
+// domainStatus is the status of the domain called name, "" without one.
+func (f *fakeAPI) domainStatus(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range f.domains {
+		if d.Domain == name {
+			return d.Status
+		}
+	}
+	return ""
+}
+
+// lapse sets a verified domain back to pending, as seven missed daily checks
+// do.
+func (f *fakeAPI) lapse(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range f.domains {
+		if d.Domain == name {
+			d.Status, d.VerifiedAt = "pending", nil
+		}
+	}
+}
+
+// verifiedDomains counts the verified domains. The caller holds f.mu.
+func (f *fakeAPI) verifiedDomains() int {
+	n := 0
+	for _, d := range f.domains {
+		if d.Status == "verified" {
+			n++
+		}
+	}
+	return n
+}
+
+// addSSO sets up a connection the way an owner does in the console.
+func (f *fakeAPI) addSSO(protocol string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sso = &fakeSSO{protocol: protocol}
+	if protocol == "oidc" {
+		f.sso.issuer, f.sso.clientID, f.sso.secret = "https://idp.example.com", "pushward", "console-secret"
+		return
+	}
+	f.sso.idp, f.sso.metadataURL = consoleIdP, idpMetadataURL
+}
+
+// ssoState reports the stored connection's secret and switches.
+func (f *fakeAPI) ssoState() (secret string, enabled, requireSSO bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sso == nil {
+		return "", false, false
+	}
+	return f.sso.secret, f.sso.enabled, f.sso.requireSSO
+}
+
+// ssoOut is the connection as GET returns it. The caller holds f.mu.
+func (f *fakeAPI) ssoOut() client.SSOConnection {
+	out := client.SSOConnection{
+		RedirectURI: "https://console.example.com/sso",
+		SAML:        &client.SSOSAML{SPEntityID: "https://sp.example.com/saml", ACSURL: "https://sp.example.com/saml/acs", SPMetadataURL: "https://sp.example.com/saml/metadata"},
+	}
+	s := f.sso
+	if s == nil {
+		return out
+	}
+	out.Configured, out.Protocol, out.Enabled, out.RequireSSO = true, s.protocol, s.enabled, s.requireSSO
+	if s.protocol == "oidc" {
+		out.OIDC = &client.SSOOIDC{Issuer: s.issuer, ClientID: s.clientID, ClientSecretSet: s.secret != ""}
+		return out
+	}
+	out.SAML.IdPEntityID, out.SAML.IdPMetadataURL = s.idp.entityID, s.metadataURL
+	for _, fp := range s.idp.fingerprints {
+		out.SAML.IdPCertificates = append(out.SAML.IdPCertificates, client.SSOCertificate{SHA256Fingerprint: fp, Subject: "CN=idp", NotAfter: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)})
+	}
+	return out
 }
 
 func (f *fakeAPI) routeOrder() []string {
@@ -1066,6 +1231,153 @@ func (f *fakeAPI) routesFor(mux *http.ServeMux) {
 			return
 		}
 		delete(f.keys, r.PathValue("id"))
+		w.WriteHeader(204)
+	})
+
+	// Domains.
+	handle("GET /orgs/{org}/domains", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, 200, map[string]any{"domains": append([]*client.Domain{}, f.domains...)})
+	})
+	handle("POST /orgs/{org}/domains", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Domain string `json:"domain"`
+		}
+		if !f.decode(w, r, &body) {
+			return
+		}
+		name := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(body.Domain)), ".")
+		if !strings.Contains(name, ".") {
+			problem(w, 422, "org.domain_invalid", "the domain must be a hostname like example.com")
+			return
+		}
+		if f.addFirst[name] {
+			delete(f.addFirst, name)
+			f.newDomain(name)
+		}
+		// No replay: the server dedupes no domain create by Idempotency-Key.
+		for _, d := range f.domains {
+			if d.Domain == name {
+				problem(w, 409, client.CodeDomainExists, "the organization already has this domain")
+				return
+			}
+		}
+		if len(f.domains) >= 20 {
+			problem(w, 409, "org.domain_limit", "an organization has at most 20 domains; remove one first")
+			return
+		}
+		d := f.newDomain(name)
+		f.created(w, r, d.ID, d)
+	})
+	handle("POST /orgs/{org}/domains/{id}/verify", func(w http.ResponseWriter, r *http.Request) {
+		d := f.domain(r.PathValue("id"))
+		switch {
+		case d == nil:
+			problem(w, 404, client.CodeDomainNotFound, "the organization has no such domain")
+		case d.Status == "verified":
+			reply(w, 200, d)
+		case f.taken[d.Domain]:
+			problem(w, 409, client.CodeDomainTaken, "another organization has already verified this domain")
+		case f.verifyMisses[d.Domain] > 0:
+			f.verifyMisses[d.Domain]--
+			problem(w, 422, client.CodeDomainNotVerified, "The TXT record was not found yet. DNS changes can take a while to appear.")
+		default:
+			now := time.Now().UTC()
+			d.Status, d.VerifiedAt = "verified", &now
+			reply(w, 200, d)
+		}
+	})
+	handle("DELETE /orgs/{org}/domains/{id}", func(w http.ResponseWriter, r *http.Request) {
+		d := f.domain(r.PathValue("id"))
+		if d == nil {
+			problem(w, 404, client.CodeDomainNotFound, "the organization has no such domain")
+			return
+		}
+		if f.sso != nil && f.sso.enabled && d.Status == "verified" && f.verifiedDomains() == 1 {
+			problem(w, 409, "org.sso_needs_domain", "single sign-on is on and this is the organization's last verified domain; turn single sign-on off first")
+			return
+		}
+		f.domains = slices.DeleteFunc(f.domains, func(x *client.Domain) bool { return x == d })
+		w.WriteHeader(204)
+	})
+
+	// Single sign-on.
+	handle("GET /orgs/{org}/sso", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, 200, f.ssoOut())
+	})
+	handle("PUT /orgs/{org}/sso", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Protocol   string `json:"protocol"`
+			Enabled    bool   `json:"enabled"`
+			RequireSSO bool   `json:"require_sso"`
+			OIDC       *struct {
+				Issuer       string  `json:"issuer"`
+				ClientID     string  `json:"client_id"`
+				ClientSecret *string `json:"client_secret"`
+			} `json:"oidc"`
+			SAML *struct {
+				XML *string `json:"idp_metadata_xml"`
+				URL *string `json:"idp_metadata_url"`
+			} `json:"saml"`
+		}
+		if !f.decode(w, r, &body) {
+			return
+		}
+		if (body.Protocol == "oidc") != (body.OIDC != nil) || (body.Protocol == "saml") != (body.SAML != nil) {
+			problem(w, 400, "request.body_invalid", "send oidc with protocol oidc, or saml with protocol saml")
+			return
+		}
+		s := f.sso
+		same := s != nil && s.protocol == body.Protocol
+		var metadata *string // the SAML metadata sent, a document or a URL; nil keeps the stored provider
+		switch {
+		case body.OIDC != nil:
+			same = same && s.issuer == body.OIDC.Issuer && s.clientID == body.OIDC.ClientID
+		case body.SAML.XML != nil && body.SAML.URL != nil:
+			problem(w, 400, "request.body_invalid", "send saml.idp_metadata_xml or saml.idp_metadata_url, not both")
+			return
+		case body.SAML.XML != nil:
+			metadata = body.SAML.XML
+		default:
+			metadata = body.SAML.URL
+		}
+		// An admin sets up no provider, refused before any metadata is read.
+		var idp samlIdP
+		if same && metadata != nil {
+			var ok bool
+			if idp, ok = f.idpMetadata[*metadata]; !ok {
+				problem(w, 422, "org.sso_metadata_invalid", "the identity provider's metadata could not be read")
+				return
+			}
+			same = idp.entityID == s.idp.entityID && idp.ssoURL == s.idp.ssoURL && slices.Equal(idp.fingerprints, s.idp.fingerprints)
+		}
+		if !same {
+			problem(w, 403, client.CodePermissionDenied, "only an owner can set up single sign-on or change its issuer or client_id")
+			return
+		}
+		if body.Enabled && f.verifiedDomains() == 0 {
+			problem(w, 409, "org.sso_needs_domain", "verify one of the organization's domains before turning single sign-on on")
+			return
+		}
+		if body.OIDC != nil && body.OIDC.ClientSecret != nil {
+			s.secret = *body.OIDC.ClientSecret
+			f.ssoSecrets++
+		}
+		if metadata != nil {
+			s.idp, s.metadataURL = idp, ""
+			if metadata == body.SAML.URL {
+				s.metadataURL = *metadata
+			}
+			f.ssoMetadata++
+		}
+		s.enabled, s.requireSSO = body.Enabled, body.RequireSSO
+		reply(w, 200, f.ssoOut())
+	})
+	handle("DELETE /orgs/{org}/sso", func(w http.ResponseWriter, r *http.Request) {
+		if f.sso == nil {
+			problem(w, 404, client.CodeSSONotFound, "the organization has no single sign-on connection")
+			return
+		}
+		f.sso = nil
 		w.WriteHeader(204)
 	})
 }

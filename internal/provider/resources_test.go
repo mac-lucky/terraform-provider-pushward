@@ -27,8 +27,8 @@ import (
 func (f *fakeAPI) empty(*terraform.State) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if n := len(f.groups) + len(f.tags) + len(f.routes) + len(f.keys); n != 0 {
-		return fmt.Errorf("%d groups, tags, routes or keys left after destroy", n)
+	if n := len(f.groups) + len(f.tags) + len(f.routes) + len(f.keys) + len(f.domains); n != 0 {
+		return fmt.Errorf("%d groups, tags, routes, keys or domains left after destroy", n)
 	}
 	return nil
 }
@@ -118,13 +118,19 @@ func TestAccPlanTimeValidation(t *testing.T) {
 		{"pushward_org_settings", `name = " Acme"`, `whitespace`},
 		{"pushward_org_settings", `name = "` + strings.Repeat("a", 51) + `"`, `between 1 and 50`},
 		{"pushward_org_settings", `name = ""`, `between 1 and 50`},
+		{"pushward_org_domain_verification", `domain_id = "0B000000-0000-4000-8000-000000000001"`, `must be lowercase`},
+		{"pushward_org_sso_connection", "protocol = \"oidc\"\nenabled = false", `protocol oidc needs the oidc settings`},
+		{"pushward_org_sso_connection", "protocol = \"saml\"\nenabled = false\nsaml = { idp_metadata_url = \"https://idp.example.com/m\" }\n" +
+			"oidc = { issuer = \"https://idp.example.com\", client_id = \"c\" }", `oidc goes with protocol oidc, not saml`},
+		{"pushward_org_sso_connection", "protocol = \"saml\"\nenabled = false\nsaml = { idp_metadata_xml = \"<md/>\", idp_metadata_url = \"https://idp.example.com/m\" }", `cannot be specified when`},
+		{"pushward_org_sso_connection", "protocol = \"saml\"\nenabled = false\nsaml = { idp_metadata_url = \"\" }", `string length must be at least 1`},
 	} {
 		resource.Test(t, resource.TestCase{
 			ProtoV6ProviderFactories: factories,
 			Steps: []resource.TestStep{{
 				Config: f.config(fmt.Sprintf("resource %q \"x\" {\n%s\n}\n", tc.typ, tc.attrs)),
 				// Terraform wraps the message wherever a space is.
-				ExpectError: regexp.MustCompile(strings.ReplaceAll(tc.want, " ", `\s+`)),
+				ExpectError: regexp.MustCompile(strings.ReplaceAll(regexp.QuoteMeta(tc.want), " ", `\s+`)),
 			}},
 		})
 	}
@@ -425,19 +431,30 @@ func TestAccLostOrgKeepsState(t *testing.T) {
 // A key of another organization is an error, never a reason to read every
 // resource as gone and create it again in that organization.
 func TestAccOtherOrgKeyKeepsState(t *testing.T) {
-	for _, tc := range []struct{ addr, body string }{
-		{"pushward_org_group.x", `resource "pushward_org_group" "x" { name = "ops" }`},
-		{"pushward_org_tag.x", `resource "pushward_org_tag" "x" { name = "pager" }`},
-		{"pushward_org_route.x", "resource \"pushward_org_route\" \"x\" {\n  slug_pattern = \"*\"\n  applies_to = \"both\"\n}"},
-		{"pushward_org_route_order.x", `resource "pushward_org_route_order" "x" { route_ids = [] }`},
-		{"pushward_org_key.x", `resource "pushward_org_key" "x" { name = "ci" }`},
-		{"pushward_org_member.x", "resource \"pushward_org_member\" \"x\" {\n  email = \"ann@example.com\"\n  role = \"member\"\n}"},
+	for _, tc := range []struct {
+		addr, body string
+		setup      func(*fakeAPI)
+	}{
+		{"pushward_org_group.x", `resource "pushward_org_group" "x" { name = "ops" }`, nil},
+		{"pushward_org_tag.x", `resource "pushward_org_tag" "x" { name = "pager" }`, nil},
+		{"pushward_org_route.x", "resource \"pushward_org_route\" \"x\" {\n  slug_pattern = \"*\"\n  applies_to = \"both\"\n}", nil},
+		{"pushward_org_route_order.x", `resource "pushward_org_route_order" "x" { route_ids = [] }`, nil},
+		{"pushward_org_key.x", `resource "pushward_org_key" "x" { name = "ci" }`, nil},
+		{"pushward_org_member.x", "resource \"pushward_org_member\" \"x\" {\n  email = \"ann@example.com\"\n  role = \"member\"\n}", nil},
 		{"pushward_org_tag_devices.x", "resource \"pushward_org_tag\" \"t\" { name = \"pager\" }\n" +
-			"resource \"pushward_org_tag_devices\" \"x\" {\n  tag_id = pushward_org_tag.t.id\n  devices = []\n}"},
-		{"pushward_org_settings.x", `resource "pushward_org_settings" "x" { name = "Acme" }`},
+			"resource \"pushward_org_tag_devices\" \"x\" {\n  tag_id = pushward_org_tag.t.id\n  devices = []\n}", nil},
+		{"pushward_org_settings.x", `resource "pushward_org_settings" "x" { name = "Acme" }`, nil},
+		{"pushward_org_domain.x", `resource "pushward_org_domain" "x" { domain = "example.com" }`, nil},
+		{"pushward_org_domain_verification.x", "resource \"pushward_org_domain\" \"d\" { domain = \"example.com\" }\n" +
+			"resource \"pushward_org_domain_verification\" \"x\" { domain_id = pushward_org_domain.d.id }", nil},
+		{"pushward_org_sso_connection.x", "resource \"pushward_org_sso_connection\" \"x\" {\n  protocol = \"oidc\"\n  enabled = false\n" +
+			"  oidc = { issuer = \"https://idp.example.com\", client_id = \"pushward\" }\n}", func(f *fakeAPI) { f.addSSO("oidc") }},
 	} {
 		t.Run(tc.addr, func(t *testing.T) {
 			a, b := newFake(t), newFake(t)
+			if tc.setup != nil {
+				tc.setup(a)
+			}
 			b.mu.Lock()
 			b.org.ID = "0a000000-0000-4000-8000-000000000002"
 			b.mu.Unlock()
@@ -491,7 +508,7 @@ func TestOtherOrgKeyUpdateDelete(t *testing.T) {
 			r.Delete(ctx, fwresource.DeleteRequest{State: st}, &del)
 			ops := map[string]diag.Diagnostics{"Update": upd.Diagnostics}
 			// These Deletes send nothing at all; the request check below covers them.
-			if md.TypeName != "pushward_org_route_order" && md.TypeName != "pushward_org_settings" {
+			if !slices.Contains([]string{"pushward_org_route_order", "pushward_org_settings", "pushward_org_domain_verification"}, md.TypeName) {
 				ops["Delete"] = del.Diagnostics
 			}
 			for op, diags := range ops {

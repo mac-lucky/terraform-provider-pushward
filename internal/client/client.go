@@ -32,6 +32,20 @@ const (
 	CodeTagNotFound    = "org.tag_not_found"
 	CodeRouteNotFound  = "org.route_not_found"
 	CodeKeyNotFound    = "integration_key.not_found"
+	CodeDomainNotFound = "org.domain_not_found"
+	CodeSSONotFound    = "org.sso_not_found"
+)
+
+// The domain and single sign-on problems the provider acts on.
+const (
+	// CodeDomainExists is the 409 of a domain the organization already has.
+	CodeDomainExists = "org.domain_exists"
+	// CodeDomainNotVerified is the 422 of a verify that found no TXT record.
+	CodeDomainNotVerified = "org.domain_not_verified"
+	// CodeDomainTaken is the 409 of a domain another organization verified.
+	CodeDomainTaken = "org.domain_taken"
+	// CodePermissionDenied is the 403 of what the caller's role may not do.
+	CodePermissionDenied = "org.permission_denied"
 )
 
 // CodeMemberEmailTaken is the 409 of an invite to an address that a member or
@@ -92,6 +106,9 @@ type Error struct {
 	Detail     string
 	RequestID  string
 	RetryAfter time.Duration
+	// Repeated is set when an earlier attempt of the same call may have been
+	// carried out: it got a 503 or a network error.
+	Repeated bool
 }
 
 func (e *Error) Error() string {
@@ -132,11 +149,15 @@ func (c *Client) OrgPath(segments ...string) string {
 
 // Do sends in as JSON and decodes the response into out (either may be nil).
 // 429, 503 and network errors are retried for every method. A POST carries a
-// random Idempotency-Key, the same on every attempt of one call, which makes
-// each POST this provider sends safe to repeat: the server answers a repeated
-// create of a route, group, tag, invite or key with the row the first attempt
-// made; a repeated key roll returns another fresh secret, and the last one is
-// the one that works; adding and removing tag devices is idempotent anyway.
+// random Idempotency-Key, the same on every attempt of one call. The server
+// answers a repeated create of a route, group, tag, invite or key with the row
+// the first attempt made; a repeated key roll returns another fresh secret,
+// and the last one is the one that works; adding and removing tag devices and
+// verifying a domain are idempotent anyway. A domain create is not deduped, so
+// it carries no key: with one, net/http resends a POST on its own when a
+// reused connection drops, and that repeat's 409 would come without Repeated.
+// Its repeat here gets 409 org.domain_exists with Repeated set, and the caller
+// has to tell its own domain from one someone else added.
 func (c *Client) Do(ctx context.Context, method, path string, in, out any) error {
 	var body []byte
 	if in != nil {
@@ -146,21 +167,30 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		}
 	}
 	var idempotencyKey string
-	if method == http.MethodPost {
+	if method == http.MethodPost && path != c.OrgPath("domains") {
 		idempotencyKey = rand.Text()
 	}
 	var limited time.Duration // waited on 429s so far
+	repeated := false         // an earlier attempt may have been carried out
 	for attempt := 1; ; attempt++ {
 		err := c.send(ctx, method, path, body, idempotencyKey, out)
 		if err == nil {
 			return nil
 		}
+		var apiErr *Error
+		if errors.As(err, &apiErr) {
+			apiErr.Repeated = repeated
+		}
 		wait, ok := c.retryWait(ctx, err, attempt, limited)
 		if !ok {
 			return err
 		}
+		// A 429 is refused before anything is done; a 503 or a network
+		// error may come after the write.
 		if rateLimited(err) {
 			limited += wait
+		} else {
+			repeated = true
 		}
 		t := time.NewTimer(wait)
 		select {

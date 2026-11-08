@@ -153,8 +153,34 @@ func TestRetries(t *testing.T) {
 	}
 }
 
+// Repeated tells a 409 after a 503, whose attempt may have made the row,
+// from one on the first attempt or after a 429.
+func TestRepeated(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		statuses []int
+		want     bool
+	}{
+		{"first attempt", []int{409}, false},
+		{"after 503", []int{503, 409}, true},
+		{"after 429", []int{429, 409}, false},
+		{"after 503 and 429", []int{503, 429, 409}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			c := testClient(t, sequence(&calls, tc.statuses...))
+			err := c.Do(context.Background(), http.MethodPost, c.OrgPath("domains"), map[string]string{"domain": "example.com"}, nil)
+			var e *Error
+			if !errors.As(err, &e) || e.Status != 409 || e.Repeated != tc.want {
+				t.Errorf("err = %#v, want a 409 with Repeated %v", err, tc.want)
+			}
+		})
+	}
+}
+
 // A POST is retried after a lost connection and a 503 with the key of its
-// first attempt; the next call gets a new key, and other methods none.
+// first attempt; the next call gets a new key, and other methods and a domain
+// create, which the server does not dedupe, none.
 func TestPOSTRetriedWithOneIdempotencyKey(t *testing.T) {
 	var mu sync.Mutex
 	var keys []string
@@ -183,10 +209,13 @@ func TestPOSTRetriedWithOneIdempotencyKey(t *testing.T) {
 	if err := c.Do(context.Background(), http.MethodGet, c.OrgPath("tags"), nil, nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.Do(context.Background(), http.MethodPost, c.OrgPath("domains"), map[string]string{"domain": "example.com"}, nil); err != nil {
+		t.Fatal(err)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(keys) != 5 {
-		t.Fatalf("sent %d requests, want 5: %q", len(keys), keys)
+	if len(keys) != 6 {
+		t.Fatalf("sent %d requests, want 6: %q", len(keys), keys)
 	}
 	valid := regexp.MustCompile(`^[!-~]{1,128}$`)
 	if !valid.MatchString(keys[0]) || keys[1] != keys[0] || keys[2] != keys[0] {
@@ -197,6 +226,9 @@ func TestPOSTRetriedWithOneIdempotencyKey(t *testing.T) {
 	}
 	if keys[4] != "" {
 		t.Errorf("GET sent Idempotency-Key %q", keys[4])
+	}
+	if keys[5] != "" {
+		t.Errorf("the domain create sent Idempotency-Key %q", keys[5])
 	}
 }
 

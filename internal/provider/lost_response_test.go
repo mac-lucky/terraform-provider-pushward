@@ -56,6 +56,18 @@ resource "pushward_org_route_order" "this" {
 			},
 		},
 		{
+			// PushWard dedupes no domain create: the retry meets 409
+			// org.domain_exists, and the resource adopts the domain.
+			name: "domain", path: "domains",
+			config: `resource "pushward_org_domain" "example" { domain = "example.com" }`,
+			check: func(f *fakeAPI) resource.TestCheckFunc {
+				return resource.ComposeAggregateTestCheckFunc(
+					f.rows("domains", func() int { return len(f.domains) }),
+					resource.TestCheckResourceAttr("pushward_org_domain.example", "status", "pending"),
+				)
+			},
+		},
+		{
 			name: "invite", path: "invites",
 			config: `
 resource "pushward_org_member" "ann" {
