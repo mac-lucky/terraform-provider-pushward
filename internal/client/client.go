@@ -226,7 +226,8 @@ func (c *Client) retryWait(ctx context.Context, err error, attempt int, limited 
 	if ctx.Err() != nil || (attempt >= c.MaxAttempts && !rateLimited(err)) {
 		return 0, false
 	}
-	wait := c.BaseWait << (attempt - 1)
+	// Capped, or a long run of 429s shifts the wait past int64: negative, then zero.
+	wait := c.BaseWait << min(attempt-1, 20)
 	var apiErr *Error
 	var netErr *url.Error
 	switch {

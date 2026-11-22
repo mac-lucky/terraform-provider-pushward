@@ -359,6 +359,17 @@ func TestRetryAfterOneMinuteWaited(t *testing.T) {
 	}
 }
 
+// A hint-less 429 deep into a run of them is past MaxWait, not a shift that
+// wrapped around to a negative or zero wait.
+func TestBackoffDoesNotOverflow(t *testing.T) {
+	c := New(DefaultURL, "hlo_test", "test")
+	for _, attempt := range []int{35, 40, 60, 100} {
+		if wait, ok := c.retryWait(context.Background(), &Error{Status: 429}, attempt, 0); ok {
+			t.Errorf("attempt %d: wait = %v, want no retry", attempt, wait)
+		}
+	}
+}
+
 // Ten requests at once against a key that lets one through every 20 ms, with
 // the exact wait in retry_after_ms as the API's limiter gives it: every one
 // gets through, though most lose more rounds than MaxAttempts.
