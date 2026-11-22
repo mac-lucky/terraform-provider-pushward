@@ -149,14 +149,20 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 			return
 		}
 	}
-	if !plan.MemberIDs.Equal(state.MemberIDs) {
+	setMembers := !plan.MemberIDs.Equal(state.MemberIDs)
+	if setMembers {
 		if err := r.c.Do(ctx, http.MethodPut, r.c.OrgPath("groups", id, "members"), map[string]any{"user_ids": members}, &g); err != nil {
 			resp.Diagnostics.AddError("Setting the group's members failed", err.Error())
 			return
 		}
 	}
 	if g.ID != "" {
+		planned := plan.MemberIDs
 		plan.set(&g)
+		// Members the PATCH did not send are a console change since the plan; the next refresh shows them.
+		if !setMembers {
+			plan.MemberIDs = planned
+		}
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }

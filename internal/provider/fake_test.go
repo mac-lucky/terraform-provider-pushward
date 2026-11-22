@@ -68,6 +68,9 @@ type fakeAPI struct {
 	// idpMetadata maps a SAML metadata document, or the URL serving one, to
 	// the identity provider it names. A URL missing from it does not answer.
 	idpMetadata map[string]samlIdP
+	// beforePatch is a console change that lands after Terraform planned and
+	// before the next PATCH arrives.
+	beforePatch func()
 }
 
 // fakeSSO is a connection an owner set up in the console. The fake's key
@@ -168,6 +171,10 @@ func (f *fakeAPI) auth(next http.Handler) http.Handler {
 		if parts := strings.Split(r.URL.Path, "/"); len(parts) > 2 && (parts[2] != f.org.ID || f.orgGone) {
 			problem(w, 404, "org.not_found", "organization not found")
 			return
+		}
+		if r.Method == http.MethodPatch && f.beforePatch != nil {
+			f.beforePatch()
+			f.beforePatch = nil
 		}
 		next.ServeHTTP(w, r)
 	})

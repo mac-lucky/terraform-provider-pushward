@@ -374,7 +374,14 @@ func (r *keyResource) Update(ctx context.Context, req resource.UpdateRequest, re
 			resp.Diagnostics.AddError("Updating the key failed", err.Error())
 			return
 		}
+		planned := plan
 		plan.set(&k)
+		// What the PATCH did not send stays as planned: the server's value can
+		// be a console change since the plan, which the next refresh shows.
+		plan.Target = planned.Target
+		if _, sent := body["expires_at"]; !sent {
+			plan.ExpiresAt = planned.ExpiresAt
+		}
 	}
 	// Last, so that nothing can fail between the roll and saving its secret.
 	// A failed roll keeps the old triggers in the state, so the next apply

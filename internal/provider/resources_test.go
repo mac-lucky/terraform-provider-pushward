@@ -81,6 +81,51 @@ func TestAccGroup(t *testing.T) {
 	})
 }
 
+// A PATCH answers with the members someone set in the console since the plan.
+// The state keeps the planned members, and the next apply puts them back.
+func TestAccGroupKeepsPlannedMembers(t *testing.T) {
+	f := newFake(t)
+	u1 := f.addMember("member", "a@example.com")
+	const n = "pushward_org_group.ops"
+	cfg := func(name string) string {
+		return f.config(fmt.Sprintf("resource \"pushward_org_group\" \"ops\" { name = %q }\n", name))
+	}
+	members := func(want int) resource.TestCheckFunc {
+		return func(*terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for _, g := range f.groups {
+				if len(g.MemberIDs) != want {
+					return fmt.Errorf("the group has members %v on the server, want %d", g.MemberIDs, want)
+				}
+			}
+			return nil
+		}
+	}
+	var id string
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.empty,
+		Steps: []resource.TestStep{
+			{Config: cfg("ops"), Check: saveAttr(n, "id", &id)},
+			{
+				PreConfig: func() {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					f.beforePatch = func() { f.groups[id].MemberIDs = []string{u1} }
+				},
+				Config:             cfg("ops-team"),
+				Check:              resource.ComposeAggregateTestCheckFunc(resource.TestCheckResourceAttr(n, "member_ids.#", "0"), members(1)),
+				ExpectNonEmptyPlan: true,
+			},
+			{
+				Config: cfg("ops-team"),
+				Check:  resource.ComposeAggregateTestCheckFunc(resource.TestCheckResourceAttr(n, "member_ids.#", "0"), members(0)),
+			},
+		},
+	})
+}
+
 func TestAccGroupNameValidated(t *testing.T) {
 	f := newFake(t)
 	resource.Test(t, resource.TestCase{
@@ -300,6 +345,53 @@ resource "pushward_org_route_order" "this" {
 				},
 				Config: cfg(`[pushward_org_route.a.id, pushward_org_route.b.id]`),
 				Check:  order("a", "b"),
+			},
+		},
+	})
+}
+
+// A PATCH that sends no expires_at, and never a target, answers with what
+// the console changed since the plan. The state keeps the planned values,
+// and the next plan shows the console's as a change.
+func TestAccKeyKeepsPlannedExpiryAndTarget(t *testing.T) {
+	f := newFake(t)
+	const n = "pushward_org_key.ci"
+	expires := time.Now().UTC().AddDate(1, 0, 0).Truncate(time.Second).Format(time.RFC3339)
+	cfg := func(name string) string {
+		return f.config(fmt.Sprintf(`
+resource "pushward_org_group" "ops" { name = "ops" }
+resource "pushward_org_tag" "pager" { name = "pager" }
+resource "pushward_org_key" "ci" {
+  name       = %q
+  expires_at = %q
+  target     = { group_ids = [pushward_org_group.ops.id], tag_ids = [pushward_org_tag.pager.id] }
+}
+`, name, expires))
+	}
+	var id string
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.empty,
+		Steps: []resource.TestStep{
+			{Config: cfg("ci"), Check: saveAttr(n, "id", &id)},
+			{
+				PreConfig: func() {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					f.beforePatch = func() {
+						k := f.keys[id]
+						later := k.ExpiresAt.AddDate(0, 1, 0)
+						k.ExpiresAt = &later
+						k.Target = &client.KeyTarget{GroupIDs: k.Target.GroupIDs}
+					}
+				},
+				Config: cfg("ci-deploy"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(n, "name", "ci-deploy"),
+					resource.TestCheckResourceAttr(n, "expires_at", expires),
+					resource.TestCheckResourceAttr(n, "target.tag_ids.#", "1"),
+				),
+				ExpectNonEmptyPlan: true,
 			},
 		},
 	})
