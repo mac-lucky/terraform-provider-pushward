@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -67,6 +68,60 @@ func TestProblemWithoutJSON(t *testing.T) {
 	var e *Error
 	if !errors.As(err, &e) || e.Status != 502 || e.Code != "" || e.Detail != "Bad Gateway" {
 		t.Fatalf("err = %#v", err)
+	}
+}
+
+// A redirect that keeps the method is followed with the body; one that would
+// turn a write into a GET is an error, never a success that wrote nothing.
+func TestRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		method string
+		status int
+		ok     bool
+	}{
+		{http.MethodGet, 301, true},
+		{http.MethodPut, 308, true},
+		{http.MethodPost, 307, true},
+		{http.MethodDelete, 301, false},
+		{http.MethodPatch, 302, false},
+		{http.MethodPost, 303, false},
+	} {
+		t.Run(fmt.Sprint(tc.method, " ", tc.status), func(t *testing.T) {
+			var final atomic.Int32
+			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/old" {
+					w.Header().Set("Location", "/new")
+					w.WriteHeader(tc.status)
+					return
+				}
+				final.Add(1)
+				if r.Method != tc.method {
+					t.Errorf("redirected %s arrived as %s", tc.method, r.Method)
+				}
+				if b, _ := io.ReadAll(r.Body); tc.method != http.MethodGet && string(b) != `{"name":"a"}` {
+					t.Errorf("redirected body = %q", b)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			})
+			var in any
+			if tc.method != http.MethodGet {
+				in = map[string]string{"name": "a"}
+			}
+			err := c.Do(context.Background(), tc.method, "/old", in, nil)
+			if tc.ok {
+				if err != nil || final.Load() != 1 {
+					t.Errorf("err = %v after %d requests to the target, want it followed once", err, final.Load())
+				}
+				return
+			}
+			var e *Error
+			if !errors.As(err, &e) || e.Status != tc.status || !strings.Contains(e.Detail, "redirected "+tc.method+" to /new") {
+				t.Errorf("err = %#v, want the %d naming the target", err, tc.status)
+			}
+			if final.Load() != 0 {
+				t.Errorf("the target got %d requests", final.Load())
+			}
+		})
 	}
 }
 

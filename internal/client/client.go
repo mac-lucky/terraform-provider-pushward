@@ -91,12 +91,25 @@ func New(baseURL, key, version string) *Client {
 		BaseURL:         strings.TrimRight(baseURL, "/"),
 		Key:             key,
 		UserAgent:       "terraform-provider-pushward/" + version,
-		HTTP:            &http.Client{Timeout: 30 * time.Second},
+		HTTP:            &http.Client{Timeout: 30 * time.Second, CheckRedirect: sameMethod},
 		MaxAttempts:     5,
 		RateLimitBudget: 5 * time.Minute,
 		MaxWait:         time.Minute,
 		BaseWait:        time.Second,
 	}
+}
+
+// sameMethod follows a redirect only when the request keeps its method: a 301,
+// 302 or 303 would turn a write into a GET, which then succeeds without
+// writing anything.
+func sameMethod(req *http.Request, via []*http.Request) error {
+	if req.Method != via[0].Method {
+		return http.ErrUseLastResponse
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
 }
 
 // Error is an RFC 9457 problem the API answered with.
@@ -278,8 +291,13 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, ide
 	if err != nil {
 		return &url.Error{Op: method, URL: req.URL.String(), Err: err}
 	}
-	if resp.StatusCode >= 400 {
-		return parseProblem(resp, data)
+	if resp.StatusCode >= 300 {
+		e := parseProblem(resp, data)
+		// Only a redirect sameMethod refused gets here; followed ones end at the final response.
+		if loc := resp.Header.Get("Location"); resp.StatusCode < 400 && loc != "" {
+			e.Detail = "the API redirected " + method + " to " + loc + "; set api_url to it"
+		}
+		return e
 	}
 	if out == nil || len(data) == 0 {
 		return nil
