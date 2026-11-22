@@ -500,18 +500,30 @@ func TestListStopsOnRepeatedCursor(t *testing.T) {
 }
 
 // A server with mail turned off answers an invite with 503 email.not_enabled
-// before it stores anything, and answers the same on every try.
-func TestEmailNotEnabledNotRetried(t *testing.T) {
-	var calls atomic.Int32
-	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		writeProblem(w, 503, `{"status":503,"code":"email.not_enabled"}`)
-	})
-	err := c.Do(context.Background(), http.MethodPost, c.OrgPath("invites"), map[string]string{"email": "ann@example.com"}, nil)
-	if !HasCode(err, "email.not_enabled") {
-		t.Fatalf("err = %v", err)
-	}
-	if n := calls.Load(); n != 1 {
-		t.Errorf("sent %d times, want 1", n)
+// before it stores anything, and answers the same on every try. A 502
+// email.send_failed revokes the invite it made, and every revoked invite
+// counts toward the daily invite caps, so a retry would only spend them.
+func TestInviteEmailErrorsNotRetried(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		code   string
+	}{
+		{503, "email.not_enabled"},
+		{502, "email.send_failed"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			var calls atomic.Int32
+			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				writeProblem(w, tc.status, fmt.Sprintf(`{"status":%d,"code":%q}`, tc.status, tc.code))
+			})
+			err := c.Do(context.Background(), http.MethodPost, c.OrgPath("invites"), map[string]string{"email": "ann@example.com"}, nil)
+			if !HasCode(err, tc.code) {
+				t.Fatalf("err = %v", err)
+			}
+			if n := calls.Load(); n != 1 {
+				t.Errorf("sent %d times, want 1", n)
+			}
+		})
 	}
 }

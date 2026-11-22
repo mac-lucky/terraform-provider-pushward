@@ -61,6 +61,11 @@ const CodeNameTaken = "org.name_taken"
 // no mail.
 const codeEmailNotEnabled = "email.not_enabled"
 
+// codeEmailSendFailed is the 502 of an invite whose mail failed. The server
+// revokes that invite, and revoked invites count toward the daily invite caps
+// of the address and the organization.
+const codeEmailSendFailed = "email.send_failed"
+
 // Client calls the API. OrgID is set once the provider has resolved the
 // key's organization.
 type Client struct {
@@ -237,8 +242,9 @@ func (c *Client) retryWait(ctx context.Context, err error, attempt int, limited 
 	var netErr *url.Error
 	switch {
 	case errors.As(err, &apiErr):
-		// A server with mail turned off answers email.not_enabled on every try.
-		if !slices.Contains(retried, apiErr.Status) || apiErr.Code == codeEmailNotEnabled {
+		// A server with mail turned off answers email.not_enabled on every try;
+		// each email.send_failed retry would spend another invite of the caps.
+		if !slices.Contains(retried, apiErr.Status) || apiErr.Code == codeEmailNotEnabled || apiErr.Code == codeEmailSendFailed {
 			return 0, false
 		}
 		if apiErr.RetryAfter > 0 {
