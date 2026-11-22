@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
@@ -664,14 +666,122 @@ resource "pushward_org_route_order" "this" {
 	})
 }
 
-// Terraform updates the order before it destroys a rule taken out of it, so
-// that update keeps the rule last until the destroy. Taking only the id out
-// keeps it last too, and the next plan still shows the difference.
+// A rule made in the console is in the refreshed state, but route_ids never
+// named it: an update that leaves it out is refused and names it, instead of
+// moving it last.
+func TestAccRouteOrderNamesConsoleRuleOnUpdate(t *testing.T) {
+	f := newFake(t)
+	cfg := f.config(`
+resource "pushward_org_route" "a" {
+  slug_pattern = "a-*"
+  applies_to   = "both"
+}
+resource "pushward_org_route_order" "this" {
+  route_ids = [pushward_org_route.a.id]
+}
+`)
+	var console string
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.empty,
+		Steps: []resource.TestStep{
+			{Config: cfg},
+			{
+				PreConfig: func() {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					console = f.id()
+					f.routes = append([]*client.Route{{ID: console, SlugPattern: "console-*", AppliesTo: "both"}}, f.routes...)
+				},
+				Config:      cfg,
+				ExpectError: regexp.MustCompile(`(?s)route_ids must name every routing rule.*Missing:\s+\S+ \(console-\*\)`),
+			},
+			{
+				PreConfig: func() {
+					if got := f.routeOrder(); len(got) != 2 || got[0] != console {
+						t.Errorf("order on the server = %v, want the console rule still first", got)
+					}
+					f.drop(console)
+				},
+				Config: cfg,
+			},
+		},
+	})
+}
+
+// warnings records the warnings that applies return, which plugin-testing
+// has no check for.
+type warnings struct {
+	mu  sync.Mutex
+	got []string
+}
+
+type warnServer struct {
+	tfprotov6.ProviderServer
+	w *warnings
+}
+
+func (s warnServer) ApplyResourceChange(ctx context.Context, req *tfprotov6.ApplyResourceChangeRequest) (*tfprotov6.ApplyResourceChangeResponse, error) {
+	resp, err := s.ProviderServer.ApplyResourceChange(ctx, req)
+	if resp != nil {
+		s.w.mu.Lock()
+		for _, d := range resp.Diagnostics {
+			if d.Severity == tfprotov6.DiagnosticSeverityWarning {
+				s.w.got = append(s.w.got, d.Summary+": "+d.Detail)
+			}
+		}
+		s.w.mu.Unlock()
+	}
+	return resp, err
+}
+
+func (w *warnings) factories() map[string]func() (tfprotov6.ProviderServer, error) {
+	return map[string]func() (tfprotov6.ProviderServer, error){
+		"pushward": func() (tfprotov6.ProviderServer, error) {
+			s, err := factories["pushward"]()
+			return warnServer{s, w}, err
+		},
+	}
+}
+
+// kept checks that the step's apply warned once that the rules with ids were
+// put last, or not at all when ids is empty, and forgets the warnings.
+func (w *warnings) kept(ids ...*string) resource.TestCheckFunc {
+	return func(*terraform.State) error {
+		w.mu.Lock()
+		got := w.got
+		w.got = nil
+		w.mu.Unlock()
+		if len(ids) == 0 {
+			if len(got) != 0 {
+				return fmt.Errorf("warnings = %q, want none", got)
+			}
+			return nil
+		}
+		if len(got) != 1 || !strings.HasPrefix(got[0], "Routing rules kept at the end of the order: route_ids no longer names ") {
+			return fmt.Errorf("warnings = %q, want one about the rules kept last", got)
+		}
+		for _, id := range ids {
+			if !strings.Contains(got[0], *id) {
+				return fmt.Errorf("warning %q does not name %s", got[0], *id)
+			}
+		}
+		return nil
+	}
+}
+
+// Terraform destroys a rule taken out of route_ids before it updates the
+// order, unless the rule is create_before_destroy: then the update comes
+// first and keeps the rule last until the destroy, with a warning. Taking only
+// the id out keeps it last and warns too, and the next plan still shows the
+// difference.
 func TestAccRouteOrderRuleRemoved(t *testing.T) {
 	f := newFake(t)
-	route := func(name string) string {
-		return fmt.Sprintf("resource \"pushward_org_route\" %q {\n  slug_pattern = \"%s-*\"\n  applies_to = \"both\"\n}\n", name, name)
+	w := &warnings{}
+	route := func(name, lifecycle string) string {
+		return fmt.Sprintf("resource \"pushward_org_route\" %q {\n  slug_pattern = \"%s-*\"\n  applies_to = \"both\"\n%s}\n", name, name, lifecycle)
 	}
+	const cbd = "  lifecycle {\n    create_before_destroy = true\n  }\n"
 	cfg := func(routes, order string) string {
 		return f.config(routes + "resource \"pushward_org_route_order\" \"this\" {\n  route_ids = " + order + "\n}\n")
 	}
@@ -688,28 +798,50 @@ func TestAccRouteOrderRuleRemoved(t *testing.T) {
 			return nil
 		}
 	}
-	both := cfg(route("a")+route("b"), `[pushward_org_route.b.id, pushward_org_route.a.id]`)
+	both := func(b string) string {
+		return cfg(route("a", "")+route("b", b), `[pushward_org_route.b.id, pushward_org_route.a.id]`)
+	}
+	onlyA := cfg(route("a", ""), `[pushward_org_route.a.id]`)
+	onlyID := cfg(route("a", "")+route("b", cbd), `[pushward_org_route.a.id]`)
+	saveB := saveAttr("pushward_org_route.b", "id", &b)
 	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: factories,
+		ProtoV6ProviderFactories: w.factories(),
 		CheckDestroy:             f.empty,
 		Steps: []resource.TestStep{
 			{
-				Config: both,
-				Check: resource.ComposeAggregateTestCheckFunc(
-					saveAttr("pushward_org_route.a", "id", &a), saveAttr("pushward_org_route.b", "id", &b), order(&b, &a)),
+				Config: both(""),
+				Check:  resource.ComposeAggregateTestCheckFunc(saveAttr("pushward_org_route.a", "id", &a), saveB, order(&b, &a), w.kept()),
 			},
 			{
-				Config: cfg(route("a"), `[pushward_org_route.a.id]`),
-				Check:  resource.ComposeAggregateTestCheckFunc(order(&a), resource.TestCheckResourceAttr("pushward_org_route_order.this", "route_ids.#", "1")),
+				Config: onlyA,
+				Check:  resource.ComposeAggregateTestCheckFunc(order(&a), w.kept(), resource.TestCheckResourceAttr("pushward_org_route_order.this", "route_ids.#", "1")),
 			},
 			{
-				Config: both,
-				Check:  resource.ComposeAggregateTestCheckFunc(saveAttr("pushward_org_route.b", "id", &b), order(&b, &a)),
+				Config: both(cbd),
+				Check:  resource.ComposeAggregateTestCheckFunc(saveB, order(&b, &a), w.kept()),
 			},
 			{
-				Config:             cfg(route("a")+route("b"), `[pushward_org_route.a.id]`),
-				Check:              order(&a, &b),
+				Config: onlyA,
+				Check:  resource.ComposeAggregateTestCheckFunc(order(&a), w.kept(&b), resource.TestCheckResourceAttr("pushward_org_route_order.this", "route_ids.#", "1")),
+			},
+			{
+				Config: both(cbd),
+				Check:  resource.ComposeAggregateTestCheckFunc(saveB, order(&b, &a), w.kept()),
+			},
+			{
+				Config:             onlyID,
+				Check:              resource.ComposeAggregateTestCheckFunc(order(&a, &b), w.kept(&b)),
 				ExpectNonEmptyPlan: true,
+			},
+			{
+				// Still left out: kept last, and warned about, on every apply.
+				Config:             onlyID,
+				Check:              resource.ComposeAggregateTestCheckFunc(order(&a, &b), w.kept(&b)),
+				ExpectNonEmptyPlan: true,
+			},
+			{
+				Config: both(cbd),
+				Check:  resource.ComposeAggregateTestCheckFunc(order(&b, &a), w.kept()),
 			},
 		},
 	})

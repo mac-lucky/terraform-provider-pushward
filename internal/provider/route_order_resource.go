@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -77,12 +78,19 @@ func routeIDs(routes []client.Route) types.List {
 	return types.ListValueMust(types.StringType, vals)
 }
 
-// put saves plan's route_ids, followed by kept, as the order.
-func (r *routeOrderResource) put(ctx context.Context, plan *routeOrderModel, kept []string, diags *diag.Diagnostics) {
+// sentKey is the private state key of the ids the last apply sent. Read
+// replaces route_ids in the state with every rule the server has, console
+// rules included, so only this tells a rule route_ids named from one it never
+// did.
+const sentKey = "sent_route_ids"
+
+// put saves plan's route_ids, followed by kept, as the order, and returns the
+// ids it sent.
+func (r *routeOrderResource) put(ctx context.Context, plan *routeOrderModel, kept []string, diags *diag.Diagnostics) []string {
 	ids := []string{}
 	diags.Append(plan.RouteIDs.ElementsAs(ctx, &ids, false)...)
 	if diags.HasError() {
-		return
+		return nil
 	}
 	ids = append(ids, kept...)
 	var out struct {
@@ -90,11 +98,12 @@ func (r *routeOrderResource) put(ctx context.Context, plan *routeOrderModel, kep
 	}
 	if err := r.c.Do(ctx, http.MethodPut, r.c.OrgPath("routes", "order"), map[string]any{"route_ids": ids}, &out); err != nil {
 		diags.AddError("Reordering the routing rules failed", r.orderMismatch(ctx, ids, err))
-		return
+		return nil
 	}
 	plan.ID = types.StringValue(r.c.OrgID)
 	plan.OrgID = types.StringValue(r.c.OrgID)
 	plan.RouteIDs = routeIDs(out.Items)
+	return ids
 }
 
 func (r *routeOrderResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -103,10 +112,13 @@ func (r *routeOrderResource) Create(ctx context.Context, req resource.CreateRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	r.put(ctx, &plan, nil, &resp.Diagnostics)
-	if !resp.Diagnostics.HasError() {
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	sent := r.put(ctx, &plan, nil, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
 	}
+	b, _ := json.Marshal(sent)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, sentKey, b)...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *routeOrderResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -134,7 +146,20 @@ func (r *routeOrderResource) Update(ctx context.Context, req resource.UpdateRequ
 	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
-	kept := r.kept(ctx, &plan, &state, &resp.Diagnostics)
+	prior, diags := req.Private.GetKey(ctx, sentKey)
+	resp.Diagnostics.Append(diags...)
+	var sent []string
+	// A state from before the key, or an import, has none: every rule
+	// route_ids leaves out then gets the 409 that names it.
+	if prior != nil {
+		if err := json.Unmarshal(prior, &sent); err != nil {
+			resp.Diagnostics.AddError("Reading the private state failed", err.Error())
+		}
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	kept := r.kept(ctx, &plan, sent, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -145,10 +170,12 @@ func (r *routeOrderResource) Update(ctx context.Context, req resource.UpdateRequ
 		ids = append(ids, rt.ID)
 		names = append(names, rt.ID+" ("+rt.SlugPattern+")")
 	}
-	r.put(ctx, &plan, ids, &resp.Diagnostics)
+	sent = r.put(ctx, &plan, ids, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	b, _ := json.Marshal(sent)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, sentKey, b)...)
 	// The kept rules are past the end of the list only until their destroy.
 	plan.RouteIDs = planned
 	if len(kept) > 0 {
@@ -159,14 +186,14 @@ func (r *routeOrderResource) Update(ctx context.Context, req resource.UpdateRequ
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// kept is the rules the state lists and the plan no longer does that still
-// exist. Terraform updates the order before it destroys a rule taken out of
-// it, and the server refuses an order that leaves out a rule it has.
-func (r *routeOrderResource) kept(ctx context.Context, plan, state *routeOrderModel, diags *diag.Diagnostics) []client.Route {
-	var planned, prior []string
+// kept is the rules the last apply sent and the plan no longer names that
+// still exist. Terraform updates the order before it destroys a
+// create_before_destroy rule taken out of it, and the server refuses an order
+// that leaves out a rule it has.
+func (r *routeOrderResource) kept(ctx context.Context, plan *routeOrderModel, sent []string, diags *diag.Diagnostics) []client.Route {
+	var planned []string
 	diags.Append(plan.RouteIDs.ElementsAs(ctx, &planned, false)...)
-	diags.Append(state.RouteIDs.ElementsAs(ctx, &prior, true)...)
-	prior = slices.DeleteFunc(prior, func(id string) bool { return slices.Contains(planned, id) })
+	prior := slices.DeleteFunc(slices.Clone(sent), func(id string) bool { return slices.Contains(planned, id) })
 	if diags.HasError() || len(prior) == 0 {
 		return nil
 	}
