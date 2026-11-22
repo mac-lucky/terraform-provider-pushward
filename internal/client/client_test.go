@@ -184,6 +184,8 @@ func TestRetries(t *testing.T) {
 		{"PUT retries 503", http.MethodPut, []int{503}, 2, true},
 		{"PATCH retries 503", http.MethodPatch, []int{503}, 2, true},
 		{"DELETE retries 503", http.MethodDelete, []int{503}, 2, true},
+		{"GET retries 502", http.MethodGet, []int{502}, 2, true},
+		{"POST retries 504", http.MethodPost, []int{504}, 2, true},
 		{"POST retries 429", http.MethodPost, []int{429}, 2, true},
 		{"POST retries 503", http.MethodPost, []int{503}, 2, true},
 		{"GET does not retry 500", http.MethodGet, []int{500}, 1, false},

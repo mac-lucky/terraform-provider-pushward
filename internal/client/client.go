@@ -14,6 +14,7 @@ import (
 	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -120,7 +121,7 @@ type Error struct {
 	RequestID  string
 	RetryAfter time.Duration
 	// Repeated is set when an earlier attempt of the same call may have been
-	// carried out: it got a 503 or a network error.
+	// carried out: it got a 502, 503, 504 or a network error.
 	Repeated bool
 }
 
@@ -161,7 +162,7 @@ func (c *Client) OrgPath(segments ...string) string {
 }
 
 // Do sends in as JSON and decodes the response into out (either may be nil).
-// 429, 503 and network errors are retried for every method. A POST carries a
+// 429, 502, 503, 504 and network errors are retried for every method. A POST carries a
 // random Idempotency-Key, the same on every attempt of one call. The server
 // answers a repeated create of a route, group, tag, invite or key with the row
 // the first attempt made; a repeated key roll returns another fresh secret,
@@ -198,7 +199,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		if !ok {
 			return err
 		}
-		// A 429 is refused before anything is done; a 503 or a network
+		// A 429 is refused before anything is done; a 5xx or a network
 		// error may come after the write.
 		if rateLimited(err) {
 			limited += wait
@@ -214,6 +215,10 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		}
 	}
 }
+
+// retried is the statuses worth another attempt: a 429, and the gateway
+// errors of a server that is restarting or slow to answer.
+var retried = []int{http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout}
 
 func rateLimited(err error) bool {
 	var e *Error
@@ -233,7 +238,7 @@ func (c *Client) retryWait(ctx context.Context, err error, attempt int, limited 
 	switch {
 	case errors.As(err, &apiErr):
 		// A server with mail turned off answers email.not_enabled on every try.
-		if (apiErr.Status != http.StatusTooManyRequests && apiErr.Status != http.StatusServiceUnavailable) || apiErr.Code == codeEmailNotEnabled {
+		if !slices.Contains(retried, apiErr.Status) || apiErr.Code == codeEmailNotEnabled {
 			return 0, false
 		}
 		if apiErr.RetryAfter > 0 {
