@@ -171,6 +171,33 @@ func sequence(calls *atomic.Int32, statuses ...int) http.HandlerFunc {
 	}
 }
 
+// The edge's http->https 301 keeps the request path in Location; the advice
+// names only what api_url takes, and none when the redirect stays on api_url.
+func TestRefusedRedirectNamesAPIURL(t *testing.T) {
+	for _, tc := range []struct {
+		base, loc, want string
+	}{
+		{"", "https://api.example.com/orgs/org-1/keys/k1", "; set api_url to https://api.example.com"},
+		{"/pushward", "https://api.example.com/pushward/orgs/org-1/keys/k1", "; set api_url to https://api.example.com/pushward"},
+		{"", "/elsewhere", ""},
+	} {
+		t.Run(tc.loc, func(t *testing.T) {
+			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", tc.loc)
+				w.WriteHeader(http.StatusMovedPermanently)
+			})
+			c.BaseURL += tc.base
+			var e *Error
+			if err := c.Do(context.Background(), http.MethodDelete, c.OrgPath("keys", "k1"), nil, nil); !errors.As(err, &e) {
+				t.Fatalf("err = %v", err)
+			}
+			if want := "the API redirected DELETE to " + tc.loc + tc.want; e.Detail != want {
+				t.Errorf("detail = %q, want %q", e.Detail, want)
+			}
+		})
+	}
+}
+
 func TestRetries(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

@@ -307,7 +307,10 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, ide
 		e := parseProblem(resp, data)
 		// Only a redirect sameMethod refused gets here; followed ones end at the final response.
 		if loc := resp.Header.Get("Location"); resp.StatusCode < 400 && loc != "" {
-			e.Detail = "the API redirected " + method + " to " + loc + "; set api_url to it"
+			e.Detail = "the API redirected " + method + " to " + loc
+			if api := c.apiURL(resp.Request.URL, loc); api != "" && api != c.BaseURL {
+				e.Detail += "; set api_url to " + api
+			}
 		}
 		return e
 	}
@@ -318,6 +321,18 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, ide
 		return fmt.Errorf("%s %s: decoding the response: %w", method, path, err)
 	}
 	return nil
+}
+
+// apiURL is the api_url a redirect to loc points at: its scheme and host,
+// with the path api_url already has. Location is the whole redirected URL, or
+// a path relative to from.
+func (c *Client) apiURL(from *url.URL, loc string) string {
+	u, err := from.Parse(loc)
+	base, baseErr := url.Parse(c.BaseURL)
+	if err != nil || baseErr != nil {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host + base.Path
 }
 
 func parseProblem(resp *http.Response, data []byte) *Error {
