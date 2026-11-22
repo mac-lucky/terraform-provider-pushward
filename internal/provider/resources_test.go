@@ -572,6 +572,57 @@ resource "pushward_org_route_order" "this" {
 	})
 }
 
+// Terraform updates the order before it destroys a rule taken out of it, so
+// that update keeps the rule last until the destroy. Taking only the id out
+// keeps it last too, and the next plan still shows the difference.
+func TestAccRouteOrderRuleRemoved(t *testing.T) {
+	f := newFake(t)
+	route := func(name string) string {
+		return fmt.Sprintf("resource \"pushward_org_route\" %q {\n  slug_pattern = \"%s-*\"\n  applies_to = \"both\"\n}\n", name, name)
+	}
+	cfg := func(routes, order string) string {
+		return f.config(routes + "resource \"pushward_org_route_order\" \"this\" {\n  route_ids = " + order + "\n}\n")
+	}
+	var a, b string
+	order := func(want ...*string) resource.TestCheckFunc {
+		return func(*terraform.State) error {
+			var ids []string
+			for _, id := range want {
+				ids = append(ids, *id)
+			}
+			if got := f.routeOrder(); !slices.Equal(got, ids) {
+				return fmt.Errorf("order on the server = %v, want %v", got, ids)
+			}
+			return nil
+		}
+	}
+	both := cfg(route("a")+route("b"), `[pushward_org_route.b.id, pushward_org_route.a.id]`)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: factories,
+		CheckDestroy:             f.empty,
+		Steps: []resource.TestStep{
+			{
+				Config: both,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					saveAttr("pushward_org_route.a", "id", &a), saveAttr("pushward_org_route.b", "id", &b), order(&b, &a)),
+			},
+			{
+				Config: cfg(route("a"), `[pushward_org_route.a.id]`),
+				Check:  resource.ComposeAggregateTestCheckFunc(order(&a), resource.TestCheckResourceAttr("pushward_org_route_order.this", "route_ids.#", "1")),
+			},
+			{
+				Config: both,
+				Check:  resource.ComposeAggregateTestCheckFunc(saveAttr("pushward_org_route.b", "id", &b), order(&b, &a)),
+			},
+			{
+				Config:             cfg(route("a")+route("b"), `[pushward_org_route.a.id]`),
+				Check:              order(&a, &b),
+				ExpectNonEmptyPlan: true,
+			},
+		},
+	})
+}
+
 func TestAccKeyRoll(t *testing.T) {
 	f := newFake(t)
 	const n = "pushward_org_key.ci"

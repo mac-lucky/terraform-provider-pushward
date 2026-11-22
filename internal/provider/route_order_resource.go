@@ -77,12 +77,14 @@ func routeIDs(routes []client.Route) types.List {
 	return types.ListValueMust(types.StringType, vals)
 }
 
-func (r *routeOrderResource) put(ctx context.Context, plan *routeOrderModel, diags *diag.Diagnostics) {
+// put saves plan's route_ids, followed by kept, as the order.
+func (r *routeOrderResource) put(ctx context.Context, plan *routeOrderModel, kept []string, diags *diag.Diagnostics) {
 	ids := []string{}
 	diags.Append(plan.RouteIDs.ElementsAs(ctx, &ids, false)...)
 	if diags.HasError() {
 		return
 	}
+	ids = append(ids, kept...)
 	var out struct {
 		Items []client.Route `json:"items"`
 	}
@@ -101,7 +103,7 @@ func (r *routeOrderResource) Create(ctx context.Context, req resource.CreateRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	r.put(ctx, &plan, &resp.Diagnostics)
+	r.put(ctx, &plan, nil, &resp.Diagnostics)
 	if !resp.Diagnostics.HasError() {
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	}
@@ -132,10 +134,56 @@ func (r *routeOrderResource) Update(ctx context.Context, req resource.UpdateRequ
 	if resp.Diagnostics.HasError() || !sameOrg(r.c, &state.OrgID, &resp.Diagnostics) {
 		return
 	}
-	r.put(ctx, &plan, &resp.Diagnostics)
-	if !resp.Diagnostics.HasError() {
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	kept := r.kept(ctx, &plan, &state, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
 	}
+	planned := plan.RouteIDs
+	ids := make([]string, 0, len(kept))
+	names := make([]string, 0, len(kept))
+	for _, rt := range kept {
+		ids = append(ids, rt.ID)
+		names = append(names, rt.ID+" ("+rt.SlugPattern+")")
+	}
+	r.put(ctx, &plan, ids, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// The kept rules are past the end of the list only until their destroy.
+	plan.RouteIDs = planned
+	if len(kept) > 0 {
+		resp.Diagnostics.AddWarning("Routing rules kept at the end of the order",
+			"route_ids no longer names "+strings.Join(names, ", ")+"; they were put last for this apply, because a rule must "+
+				"stay listed until it is destroyed. If this apply does not destroy them, add them back to route_ids.")
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// kept is the rules the state lists and the plan no longer does that still
+// exist. Terraform updates the order before it destroys a rule taken out of
+// it, and the server refuses an order that leaves out a rule it has.
+func (r *routeOrderResource) kept(ctx context.Context, plan, state *routeOrderModel, diags *diag.Diagnostics) []client.Route {
+	var planned, prior []string
+	diags.Append(plan.RouteIDs.ElementsAs(ctx, &planned, false)...)
+	diags.Append(state.RouteIDs.ElementsAs(ctx, &prior, true)...)
+	prior = slices.DeleteFunc(prior, func(id string) bool { return slices.Contains(planned, id) })
+	if diags.HasError() || len(prior) == 0 {
+		return nil
+	}
+	var out struct {
+		Items []client.Route `json:"items"`
+	}
+	if err := r.c.Do(ctx, http.MethodGet, r.c.OrgPath("routes"), nil, &out); err != nil {
+		diags.AddError("Reading the routing rules failed", err.Error())
+		return nil
+	}
+	var kept []client.Route
+	for _, id := range prior {
+		if i := slices.IndexFunc(out.Items, func(rt client.Route) bool { return rt.ID == id }); i >= 0 {
+			kept = append(kept, out.Items[i])
+		}
+	}
+	return kept
 }
 
 // Delete only forgets the order: there is no order to remove, so it sends
