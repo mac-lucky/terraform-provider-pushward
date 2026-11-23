@@ -114,7 +114,8 @@ An admin key cannot do everything an owner can, on purpose. The organization's n
 
 ## Retries
 
-A request that gets a 502, 503 or 504 or loses its connection is tried up to five times. One that gets a
+A request that gets a 502, 503 or 504 or loses its connection is tried up to five times, except
+an invite that gets a 502: its mail failed, and another try would mail and count again. One that gets a
 429 waits as long as PushWard says, plus a random extra so parallel requests do not all come
 back at once, and keeps trying for up to five minutes in all. Creates
 send an `Idempotency-Key`, so when the connection drops after PushWard made the rule, group,

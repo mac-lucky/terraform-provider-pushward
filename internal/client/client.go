@@ -61,11 +61,6 @@ const CodeNameTaken = "org.name_taken"
 // no mail.
 const codeEmailNotEnabled = "email.not_enabled"
 
-// codeEmailSendFailed is the 502 of an invite whose mail failed. The server
-// revokes that invite, and revoked invites count toward the daily invite caps
-// of the address and the organization.
-const codeEmailSendFailed = "email.send_failed"
-
 // Client calls the API. OrgID is set once the provider has resolved the
 // key's organization.
 type Client struct {
@@ -167,7 +162,8 @@ func (c *Client) OrgPath(segments ...string) string {
 }
 
 // Do sends in as JSON and decodes the response into out (either may be nil).
-// 429, 502, 503, 504 and network errors are retried for every method. A POST carries a
+// 429, 502, 503, 504 and network errors are retried for every method, but an
+// invite create's 502 is not. A POST carries a
 // random Idempotency-Key, the same on every attempt of one call. The server
 // answers a repeated create of a route, group, tag, invite or key with the row
 // the first attempt made; a repeated key roll returns another fresh secret,
@@ -189,6 +185,11 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if method == http.MethodPost && path != c.OrgPath("domains") {
 		idempotencyKey = rand.Text()
 	}
+	// An invite's 502 is email.send_failed: the server revoked the invite, and
+	// revoked invites count toward the daily invite caps of the address and the
+	// organization, so a retry mails another and spends them. The edge may
+	// replace that 502's body, so the status alone decides.
+	invite := method == http.MethodPost && path == c.OrgPath("invites")
 	var limited time.Duration // waited on 429s so far
 	repeated := false         // an earlier attempt may have been carried out
 	for attempt := 1; ; attempt++ {
@@ -199,6 +200,9 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		var apiErr *Error
 		if errors.As(err, &apiErr) {
 			apiErr.Repeated = repeated
+			if invite && apiErr.Status == http.StatusBadGateway {
+				return err
+			}
 		}
 		wait, ok := c.retryWait(ctx, err, attempt, limited)
 		if !ok {
@@ -242,9 +246,8 @@ func (c *Client) retryWait(ctx context.Context, err error, attempt int, limited 
 	var netErr *url.Error
 	switch {
 	case errors.As(err, &apiErr):
-		// A server with mail turned off answers email.not_enabled on every try;
-		// each email.send_failed retry would spend another invite of the caps.
-		if !slices.Contains(retried, apiErr.Status) || apiErr.Code == codeEmailNotEnabled || apiErr.Code == codeEmailSendFailed {
+		// A server with mail turned off answers email.not_enabled on every try.
+		if !slices.Contains(retried, apiErr.Status) || apiErr.Code == codeEmailNotEnabled {
 			return 0, false
 		}
 		if apiErr.RetryAfter > 0 {

@@ -213,6 +213,7 @@ func TestRetries(t *testing.T) {
 		{"DELETE retries 503", http.MethodDelete, []int{503}, 2, true},
 		{"GET retries 502", http.MethodGet, []int{502}, 2, true},
 		{"POST retries 504", http.MethodPost, []int{504}, 2, true},
+		{"POST retries 502", http.MethodPost, []int{502}, 2, true},
 		{"POST retries 429", http.MethodPost, []int{429}, 2, true},
 		{"POST retries 503", http.MethodPost, []int{503}, 2, true},
 		{"GET does not retry 500", http.MethodGet, []int{500}, 1, false},
@@ -529,23 +530,33 @@ func TestListStopsOnRepeatedCursor(t *testing.T) {
 // A server with mail turned off answers an invite with 503 email.not_enabled
 // before it stores anything, and answers the same on every try. A 502
 // email.send_failed revokes the invite it made, and every revoked invite
-// counts toward the daily invite caps, so a retry would only spend them.
+// counts toward the daily invite caps, so a retry would only spend them. The
+// edge can put its own page in place of that 502's body.
 func TestInviteEmailErrorsNotRetried(t *testing.T) {
 	for _, tc := range []struct {
+		name   string
 		status int
 		code   string
 	}{
-		{503, "email.not_enabled"},
-		{502, "email.send_failed"},
+		{"email.not_enabled", 503, "email.not_enabled"},
+		{"email.send_failed", 502, "email.send_failed"},
+		{"502 without a problem body", 502, ""},
 	} {
-		t.Run(tc.code, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
 			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
+				if tc.code == "" {
+					w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
+					w.WriteHeader(tc.status)
+					fmt.Fprint(w, "error code: 502")
+					return
+				}
 				writeProblem(w, tc.status, fmt.Sprintf(`{"status":%d,"code":%q}`, tc.status, tc.code))
 			})
 			err := c.Do(context.Background(), http.MethodPost, c.OrgPath("invites"), map[string]string{"email": "ann@example.com"}, nil)
-			if !HasCode(err, tc.code) {
+			var e *Error
+			if !errors.As(err, &e) || e.Status != tc.status || e.Code != tc.code {
 				t.Fatalf("err = %v", err)
 			}
 			if n := calls.Load(); n != 1 {
